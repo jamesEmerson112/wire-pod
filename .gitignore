@@ -41,3 +41,10 @@
 /whisper.cpp
 .DS_Store
 /chipper/openaiChats.json
+
+# local secrets / environment
+.env
+
+# local scratch: downloaded wpsetup site JS (investigation) and bot log dumps
+/vws
+vector-logs-*.tar.bz2
