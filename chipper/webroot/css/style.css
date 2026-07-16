@@ -593,3 +593,117 @@ input[type='checkbox']:checked:after {
   margin-left: 5px;
   word-break: break-word;
 }
+
+/* ===== Log table ===== */
+.log-table-wrap {
+  height: 280px;
+  overflow-y: auto;
+  border: 2px solid var(--fg-color);
+  background-color: #2d2d2d;
+}
+
+#logTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'IBMVGA', monospace;
+  font-size: 0.85em;
+  color: #ffffff;
+  text-align: left;
+}
+
+#logTable thead th {
+  position: sticky;
+  top: 0;
+  background-color: #1e1e1e;
+  color: var(--fg-color);
+  padding: 1px 6px;
+  z-index: 1;
+}
+
+#logTable td {
+  padding: 1px 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  vertical-align: top;
+}
+
+.log-time {
+  color: #888;
+  white-space: nowrap;
+}
+
+.log-msg {
+  width: 100%;
+}
+
+.level-DEBUG { color: #888; }
+.level-INFO { color: var(--fg-color); }
+.level-WARN { color: var(--medium-battery); }
+.level-ERROR { color: var(--low-battery); }
+
+.comp-llm { color: #c586ff; }
+.comp-stt { color: #00d1d1; }
+.comp-intent { color: #ffb000; }
+.comp-jdocs { color: #56b6c2; }
+.comp-token { color: #d19a66; }
+.comp-sdkapp { color: #61afef; }
+.comp-voice { color: #98c379; }
+.comp-conn { color: #e06c75; }
+.comp-web { color: #e5c07b; }
+
+/* ===== Bot status strip ===== */
+#botStatusStrip {
+  width: 100%;
+  max-width: 950px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin: 0 auto 1rem auto;
+  padding: 0 1rem;
+  box-sizing: border-box;
+}
+
+.bot-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(30, 30, 30, 0.6);
+  font-family: var(--body-font-family);
+  font-size: 0.5em;
+  color: var(--text-color);
+}
+
+.bot-status-empty {
+  font-family: var(--body-font-family);
+  font-size: 0.5em;
+  color: var(--bg-color-alt);
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.status-online {
+  background-color: var(--fg-color);
+}
+
+.status-offline {
+  background-color: var(--low-battery);
+  animation: blink 1s step-start infinite;
+}
+
+.status-disconnected {
+  background-color: var(--low-battery);
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}

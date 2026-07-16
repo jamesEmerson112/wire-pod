@@ -60,6 +60,8 @@
       </div>
       <hr />
 
+      <div id="botStatusStrip"></div>
+
       <div id="section-intents" style="display: none">
         <h2 id="foldable-add" onclick="toggleSection('content-add', 'content-edit')">
           <span>+</span>
@@ -154,15 +156,31 @@
         <hr class="small-hr">
         <div class="center">
           <div style="text-align:left">
-            <input id="logdebug" name="logdebug" type="checkbox" />
-            <label class="checkbox-label" for="logdebug">Show all logs</label><br />
-            <input id="logscrollbottom" name="logscrollbottom" type="checkbox" />
+            <label class="checkbox-label" for="logLevel">Level:</label>
+            <select id="logLevel">
+              <option value="debug">All</option>
+              <option value="info" selected="selected">Info</option>
+              <option value="warn">Warn</option>
+              <option value="error">Error</option>
+            </select><br />
+            <input id="logscrollbottom" name="logscrollbottom" type="checkbox" checked />
             <label class="checkbox-label" for="logscrollbottom">Scroll to bottom</label>
           </div>
         </div>
-        <textarea id="botTranscriptedTextArea" rows="7" cols="50">
-          loading log...
-        </textarea>
+        <div id="logTableWrap" class="log-table-wrap">
+          <table id="logTable">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Level</th>
+                <th>Comp</th>
+                <th>Bot</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody id="logTableBody"></tbody>
+          </table>
+        </div>
         <hr class="log-hr" />
       </div>
 

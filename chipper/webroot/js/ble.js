@@ -8,7 +8,7 @@ externalSetup.href = vectorEpodSetup;
 externalSetup.innerHTML = vectorEpodSetup;
 
 function showBotAuth() {
-  GetLog = false;
+  stopLogPolling();
   toggleSections("section-botauth", "icon-BotAuth");
   checkBLECapability();
 }

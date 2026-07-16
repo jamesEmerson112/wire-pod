@@ -2,9 +2,18 @@ const intentsJson = JSON.parse(
   '["intent_greeting_hello", "intent_names_ask", "intent_imperative_eyecolor", "intent_character_age", "intent_explore_start", "intent_system_charger", "intent_system_sleep", "intent_greeting_goodmorning", "intent_greeting_goodnight", "intent_greeting_goodbye", "intent_seasonal_happynewyear", "intent_seasonal_happyholidays", "intent_amazon_signin", "intent_imperative_forward", "intent_imperative_turnaround", "intent_imperative_turnleft", "intent_imperative_turnright", "intent_play_rollcube", "intent_play_popawheelie", "intent_play_fistbump", "intent_play_blackjack", "intent_imperative_affirmative", "intent_imperative_negative", "intent_photo_take_extend", "intent_imperative_praise", "intent_imperative_abuse", "intent_weather_extend", "intent_imperative_apologize", "intent_imperative_backup", "intent_imperative_volumedown", "intent_imperative_volumeup", "intent_imperative_lookatme", "intent_imperative_volumelevel_extend", "intent_imperative_shutup", "intent_names_username_extend", "intent_imperative_come", "intent_imperative_love", "intent_knowledge_promptquestion", "intent_clock_checktimer", "intent_global_stop_extend", "intent_clock_settimer_extend", "intent_clock_time", "intent_imperative_quiet", "intent_imperative_dance", "intent_play_pickupcube", "intent_imperative_fetchcube", "intent_imperative_findcube", "intent_play_anytrick", "intent_message_recordmessage_extend", "intent_message_playmessage_extend", "intent_blackjack_hit", "intent_blackjack_stand", "intent_play_keepaway"]'
 );
 
-var GetLog = false;
+let logTimer = null;
+let logSince = 0;
+const LOG_MAX_ROWS = 500;
 
 const getE = (element) => document.getElementById(element);
+
+function stopLogPolling() {
+  if (logTimer !== null) {
+    clearInterval(logTimer);
+    logTimer = null;
+  }
+}
 
 function updateIntentSelection(element) {
   fetch("/api/get_custom_intents_json")
@@ -498,27 +507,77 @@ function updateColor(id) {
 }
 
 
-function showLog() {
-  toggleVisibility(["section-intents", "section-log", "section-botauth", "section-version", "section-uicustomizer"], "section-log", "icon-Logs");
-  logDivArea = getE("botTranscriptedTextArea");
-  getE("logscrollbottom").checked = true;
-  logP = document.createElement("p");
-  GetLog = true
-  const interval = setInterval(() => {
-    if (!GetLog) {
-      clearInterval(interval);
-      return;
-    }
-    const url = getE("logdebug").checked ? "/api/get_debug_logs" : "/api/get_logs";
-    fetch(url)
-      .then((response) => response.text())
-      .then((logs) => {
-        logDivArea.innerHTML = logs || "No logs yet, you must say a command to Vector. (this updates automatically)";
-        if (getE("logscrollbottom").checked) {
-          logDivArea.scrollTop = logDivArea.scrollHeight;
+function appendLogRow(e) {
+  const tbody = getE("logTableBody");
+  const tr = document.createElement("tr");
+
+  const tdTime = document.createElement("td");
+  tdTime.className = "log-time";
+  tdTime.textContent = new Date(e.t).toLocaleTimeString();
+  tr.appendChild(tdTime);
+
+  const tdLevel = document.createElement("td");
+  tdLevel.className = "level-" + e.level;
+  tdLevel.textContent = e.level;
+  tr.appendChild(tdLevel);
+
+  const tdComp = document.createElement("td");
+  tdComp.className = "comp-" + (e.comp || "none");
+  tdComp.textContent = e.comp || "";
+  tr.appendChild(tdComp);
+
+  const tdBot = document.createElement("td");
+  tdBot.textContent = e.bot || "";
+  tr.appendChild(tdBot);
+
+  const tdMsg = document.createElement("td");
+  tdMsg.className = "log-msg";
+  tdMsg.textContent = e.msg;
+  tr.appendChild(tdMsg);
+
+  tbody.appendChild(tr);
+}
+
+function fetchLogs(full) {
+  const level = getE("logLevel").value;
+  const since = full ? 0 : logSince;
+  fetch("/api/get_logs_json?level=" + level + "&since=" + since)
+    .then((response) => response.json())
+    .then((logs) => {
+      if (!logs) {
+        return;
+      }
+      logs.forEach((e) => {
+        appendLogRow(e);
+        if (e.t > logSince) {
+          logSince = e.t;
         }
       });
-  }, 500);
+      const tbody = getE("logTableBody");
+      while (tbody.childElementCount > LOG_MAX_ROWS) {
+        tbody.removeChild(tbody.firstElementChild);
+      }
+      if (getE("logscrollbottom").checked) {
+        const wrap = getE("logTableWrap");
+        wrap.scrollTop = wrap.scrollHeight;
+      }
+    })
+    .catch(() => {
+      // Do nothing
+    });
+}
+
+function showLog() {
+  toggleVisibility(["section-intents", "section-log", "section-botauth", "section-version", "section-uicustomizer"], "section-log", "icon-Logs");
+  logSince = 0;
+  getE("logTableBody").innerHTML = "";
+  getE("logLevel").onchange = () => {
+    logSince = 0;
+    getE("logTableBody").innerHTML = "";
+    fetchLogs(true);
+  };
+  fetchLogs(true);
+  logTimer = setInterval(() => fetchLogs(false), 750);
 }
 
 function checkUpdate() {
@@ -605,12 +664,62 @@ function showKG() {
 }
 
 function toggleVisibility(sections, sectionToShow, iconId) {
-  if (sectionToShow != "section-log") {
-    GetLog = false;
-  }
+  stopLogPolling();
   sections.forEach((section) => {
     getE(section).style.display = "none";
   });
   getE(sectionToShow).style.display = "block";
   updateColor(iconId);
+}
+
+function renderBotStatus(bots) {
+  const strip = getE("botStatusStrip");
+  if (!strip) {
+    return;
+  }
+  strip.innerHTML = "";
+  if (!bots || bots.length === 0) {
+    const span = document.createElement("span");
+    span.className = "bot-status-empty";
+    span.textContent = "no robots seen yet";
+    strip.appendChild(span);
+    return;
+  }
+  bots.forEach((bot) => {
+    const pill = document.createElement("span");
+    pill.className = "bot-status-pill";
+
+    const dot = document.createElement("span");
+    dot.className = "status-dot status-" + bot.status;
+    pill.appendChild(dot);
+
+    const label = document.createElement("span");
+    label.className = "bot-status-label";
+    if (bot.status === "online") {
+      label.textContent = bot.esn + " · online (" + bot.timesince + "s ago)";
+    } else if (bot.status === "offline") {
+      label.textContent = bot.esn + " · offline";
+    } else {
+      label.textContent = bot.esn + " · disconnected";
+    }
+    pill.appendChild(label);
+
+    strip.appendChild(pill);
+  });
+}
+
+function pollBotStatus() {
+  fetch("/api/get_bot_status")
+    .then((response) => response.json())
+    .then((bots) => {
+      renderBotStatus(bots);
+    })
+    .catch(() => {
+      // Do nothing
+    });
+}
+
+if (getE("botStatusStrip")) {
+  pollBotStatus();
+  setInterval(pollBotStatus, 2000);
 }
