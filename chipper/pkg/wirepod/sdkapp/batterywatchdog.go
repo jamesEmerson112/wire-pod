@@ -31,6 +31,10 @@ type bwBotState struct {
 	attempts       int
 	coolingUntil   time.Time
 	docking        bool
+	// charger-transition tracking; haveReading avoids logging a
+	// transition on the first poll after startup
+	haveReading bool
+	lastHome    bool
 }
 
 type bwCachedConn struct {
@@ -168,9 +172,19 @@ func bwPollBot(esn string) {
 	volts := resp.BatteryVolts
 	percent := bwBatteryPercent(volts)
 	threshold := bwThreshold()
+	home := resp.IsCharging || resp.IsOnChargerPlatform
 
 	bwMu.Lock()
-	if resp.IsCharging || resp.IsOnChargerPlatform || volts <= 0 {
+	if state.haveReading && home != state.lastHome {
+		if home {
+			logger.Info("sdkapp", esn, fmt.Sprintf("robot is back on the charger (%d%%, %.2fV)", percent, volts))
+		} else {
+			logger.Info("sdkapp", esn, fmt.Sprintf("robot left the charger (%d%%, %.2fV)", percent, volts))
+		}
+	}
+	state.haveReading = true
+	state.lastHome = home
+	if home || volts <= 0 {
 		state.consecutiveLow = 0
 		state.attempts = 0
 		state.coolingUntil = time.Time{}
