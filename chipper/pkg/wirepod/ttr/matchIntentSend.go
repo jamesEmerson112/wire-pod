@@ -52,9 +52,9 @@ func IntentPass(req interface{}, intentThing string, speechText string, intentPa
 			Action:    intentThing,
 		}
 	}
-	logger.LogUI("Intent matched: " + intentThing + ", transcribed text: '" + speechText + "', device: " + esn)
+	logger.Info("intent", esn, "matched "+intentThing+", text '"+speechText+"'")
 	if isParam {
-		logger.LogUI("Parameters sent: " + fmt.Sprint(intentParams))
+		logger.Info("intent", esn, "params "+fmt.Sprint(intentParams))
 	}
 	intent := pb.IntentResponse{
 		IsFinal:      true,
@@ -73,11 +73,11 @@ func IntentPass(req interface{}, intentThing string, speechText string, intentPa
 		r := &vtt.IntentResponse{
 			Intent: &intent,
 		}
-		logger.Println("Bot " + esn + " Intent Sent: " + intentThing)
+		logger.Info("intent", esn, "intent sent: "+intentThing)
 		if isParam {
-			logger.Println("Bot "+esn+" Parameters Sent:", intentParams)
+			logger.Debug("intent", esn, "params sent: "+fmt.Sprint(intentParams))
 		} else {
-			logger.Println("No Parameters Sent")
+			logger.Debug("intent", esn, "no params sent")
 		}
 		return r, nil
 	} else {
@@ -87,11 +87,11 @@ func IntentPass(req interface{}, intentThing string, speechText string, intentPa
 		r := &vtt.IntentGraphResponse{
 			Intent: &intentGraphSend,
 		}
-		logger.Println("Bot " + esn + " Intent Sent: " + intentThing)
+		logger.Info("intent", esn, "intent sent: "+intentThing)
 		if isParam {
-			logger.Println("Bot "+esn+" Parameters Sent:", intentParams)
+			logger.Debug("intent", esn, "params sent: "+fmt.Sprint(intentParams))
 		} else {
-			logger.Println("No Parameters Sent")
+			logger.Debug("intent", esn, "no params sent")
 		}
 		return r, nil
 	}
@@ -107,11 +107,11 @@ func customIntentHandler(req interface{}, voiceText string, botSerial string) bo
 				var seekText = strings.ToLower(strings.TrimSpace(v))
 				// System intents can also match any utterances (*)
 				if (c.IsSystemIntent && strings.HasPrefix(seekText, "*")) || strings.Contains(voiceText, seekText) {
-					logger.Println("Bot " + botSerial + " Custom Intent Matched: " + c.Name + " - " + c.Description + " - " + c.Intent)
+					logger.Debug("intent", botSerial, "custom intent matched: "+c.Name+" - "+c.Description+" - "+c.Intent)
 					var intentParams map[string]string
 					var isParam bool = false
 					if c.Params.ParamValue != "" {
-						logger.Println("Bot " + botSerial + " Custom Intent Parameter: " + c.Params.ParamName + " - " + c.Params.ParamValue)
+						logger.Debug("intent", botSerial, "custom intent parameter: "+c.Params.ParamName+" - "+c.Params.ParamValue)
 						intentParams = map[string]string{c.Params.ParamName: c.Params.ParamValue}
 						isParam = true
 					}
@@ -120,7 +120,7 @@ func customIntentHandler(req interface{}, voiceText string, botSerial string) bo
 						if c.LuaScript != "" {
 							err := scripting.RunLuaScript(botSerial, c.LuaScript)
 							if err != nil {
-								logger.Println("Error running Lua script: " + err.Error())
+								logger.Error("lua", botSerial, "lua script: "+err.Error())
 							}
 						}
 					}()
@@ -141,10 +141,10 @@ func customIntentHandler(req interface{}, voiceText string, botSerial string) bo
 					}
 					var customIntentExec *exec.Cmd
 					if len(args) == 0 {
-						logger.Println("Bot " + botSerial + " Executing: " + c.Exec)
+						logger.Debug("intent", botSerial, "executing: "+c.Exec)
 						customIntentExec = exec.Command(c.Exec)
 					} else {
-						logger.Println("Bot " + botSerial + " Executing: " + c.Exec + " " + strings.Join(args, " "))
+						logger.Debug("intent", botSerial, "executing: "+c.Exec+" "+strings.Join(args, " "))
 						customIntentExec = exec.Command(c.Exec, args...)
 					}
 					var out bytes.Buffer
@@ -155,14 +155,14 @@ func customIntentHandler(req interface{}, voiceText string, botSerial string) bo
 					if err != nil {
 						fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
 					}
-					logger.Println("Bot " + botSerial + " Custom Intent Exec Output: " + strings.TrimSpace(string(out.String())))
+					logger.Debug("intent", botSerial, "custom intent exec output: "+strings.TrimSpace(string(out.String())))
 
 					if c.IsSystemIntent {
 						// A system intent returns its output in json format
 						var resp systemIntentResponseStruct
 						err := json.Unmarshal(out.Bytes(), &resp)
 						if err == nil && resp.Status == "ok" {
-							logger.Println("Bot " + botSerial + " System intent parsed and executed successfully")
+							logger.Debug("intent", botSerial, "system intent parsed and executed successfully")
 							IntentPass(req, resp.ReturnIntent, voiceText, intentParams, isParam)
 							successMatched = true
 						}
@@ -196,7 +196,7 @@ func pluginFunctionHandler(req interface{}, voiceText string, botSerial string) 
 		array := array
 		for _, str := range *array {
 			if strings.Contains(voiceText, str) || str == "*" {
-				logger.Println("Bot " + botSerial + " matched plugin " + PluginNames[num] + ", executing function")
+				logger.Debug("intent", botSerial, "matched plugin "+PluginNames[num]+", executing function")
 				var guid string
 				var target string
 				for _, bot := range vars.BotInfo.Robots {
@@ -212,7 +212,7 @@ func pluginFunctionHandler(req interface{}, voiceText string, botSerial string) 
 				if intent == "" {
 					intent = "intent_imperative_praise"
 				}
-				logger.Println("Bot " + botSerial + " plugin " + PluginNames[num] + ", response " + pluginResponse)
+				logger.Debug("intent", botSerial, "plugin "+PluginNames[num]+", response "+pluginResponse)
 				if pluginResponse != "" && igr != nil {
 					response := &pb.IntentGraphResponse{
 						Session:      igr.Session,
@@ -261,12 +261,12 @@ func ProcessTextAll(req interface{}, voiceText string, intents []vars.JsonIntent
 	pluginMatched := pluginFunctionHandler(req, voiceText, botSerial)
 	customIntentMatched := customIntentHandler(req, voiceText, botSerial)
 	if !customIntentMatched && !pluginMatched {
-		logger.Println("Not a custom intent")
+		logger.Debug("intent", botSerial, "not a custom intent")
 		// Look for a perfect match first
 		for _, b := range intents {
 			for _, c := range b.Keyphrases {
 				if voiceText == strings.ToLower(c) {
-					logger.Println("Bot " + botSerial + " Perfect match for intent " + b.Name + " (" + strings.ToLower(c) + ")")
+					logger.Debug("intent", botSerial, "perfect match for intent "+b.Name+" ("+strings.ToLower(c)+")")
 					if isOpus {
 						ParamChecker(req, b.Name, voiceText, botSerial)
 					} else {
@@ -290,7 +290,7 @@ func ProcessTextAll(req interface{}, voiceText string, intents []vars.JsonIntent
 			for _, b := range intents {
 				for _, c := range b.Keyphrases {
 					if strings.Contains(voiceText, strings.ToLower(c)) && !b.RequireExactMatch {
-						logger.Println("Bot " + botSerial + " Partial match for intent " + b.Name + " (" + strings.ToLower(c) + ")")
+						logger.Debug("intent", botSerial, "partial match for intent "+b.Name+" ("+strings.ToLower(c)+")")
 						if isOpus {
 							ParamChecker(req, b.Name, voiceText, botSerial)
 						} else {
@@ -309,7 +309,7 @@ func ProcessTextAll(req interface{}, voiceText string, intents []vars.JsonIntent
 			}
 		}
 	} else {
-		logger.Println("This is a custom intent or plugin!")
+		logger.Debug("intent", botSerial, "this is a custom intent or plugin")
 		successMatched = true
 	}
 	return successMatched

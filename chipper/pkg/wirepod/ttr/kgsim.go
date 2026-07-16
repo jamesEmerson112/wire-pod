@@ -154,9 +154,9 @@ func CreateAIReq(transcribedText, esn string, gpt3tryagain, isKG bool) openai.Ch
 		model = openai.GPT3Dot5Turbo
 	} else if vars.APIConfig.Knowledge.Provider == "openai" {
 		model = openai.GPT4oMini
-		logger.Println("Using " + model)
+		logger.Debug("llm", esn, "using "+model)
 	} else {
-		logger.Println("Using " + vars.APIConfig.Knowledge.Model)
+		logger.Debug("llm", esn, "using "+vars.APIConfig.Knowledge.Model)
 		model = vars.APIConfig.Knowledge.Model
 	}
 
@@ -165,7 +165,7 @@ func CreateAIReq(transcribedText, esn string, gpt3tryagain, isKG bool) openai.Ch
 	nChat = append(nChat, smsg)
 	if vars.APIConfig.Knowledge.SaveChat {
 		rchat := GetChat(esn)
-		logger.Println("Using remembered chats, length of " + fmt.Sprint(len(rchat.Chats)) + " messages")
+		logger.Debug("llm", esn, "using remembered chats, length of "+fmt.Sprint(len(rchat.Chats))+" messages")
 		nChat = append(nChat, rchat.Chats...)
 	}
 	nChat = append(nChat, openai.ChatCompletionMessage{
@@ -264,14 +264,12 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 	if err != nil {
 		log.Printf("Error creating chat completion stream: %v", err)
 		if strings.Contains(err.Error(), "does not exist") && vars.APIConfig.Knowledge.Provider == "openai" {
-			logger.Println("GPT-4 model cannot be accessed with this API key. You likely need to add more than $5 dollars of funds to your OpenAI account.")
-			logger.LogUI("GPT-4 model cannot be accessed with this API key. You likely need to add more than $5 dollars of funds to your OpenAI account.")
+			logger.Warn("llm", esn, "GPT-4 not accessible with this key; add credit to the OpenAI account")
 			aireq := CreateAIReq(transcribedText, esn, true, isKG)
-			logger.Println("Falling back to " + aireq.Model)
-			logger.LogUI("Falling back to " + aireq.Model)
+			logger.Warn("llm", esn, "falling back to "+aireq.Model)
 			stream, err = c.CreateChatCompletionStream(ctx, aireq)
 			if err != nil {
-				logger.Println("OpenAI still not returning a response even after falling back. Erroring.")
+				logger.Error("llm", esn, "openai still not returning a response after falling back")
 				return "", err
 			}
 		} else {
@@ -298,7 +296,7 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 			if errors.Is(err, io.EOF) {
 				// prevents a crash
 				if len(fullRespSlice) == 0 {
-					logger.Println("LLM returned no response")
+					logger.Debug("llm", esn, "LLM returned no response")
 					successIntent <- false
 					if isKG {
 						kgStopLooping = true
@@ -321,7 +319,7 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 					newStr = newStr + " " + str
 				}
 				if strings.TrimSpace(newStr) != strings.TrimSpace(fullfullRespText) {
-					logger.Println("LLM debug: there is content after the last punctuation mark")
+					logger.Debug("llm", esn, "LLM debug: there is content after the last punctuation mark")
 					extraBit := strings.TrimPrefix(fullRespText, newStr)
 					fullRespSlice = append(fullRespSlice, extraBit)
 				}
@@ -336,18 +334,18 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 						},
 						esn)
 				}
-				logger.LogUI("LLM response for " + esn + ": " + newStr)
-				logger.Println("LLM stream finished")
+				logger.Info("llm", esn, "response: "+newStr)
+				logger.Debug("llm", esn, "LLM stream finished")
 				return
 			}
 
 			if err != nil {
-				logger.Println("Stream error: " + err.Error())
+				logger.Error("llm", esn, "stream error: "+err.Error())
 				return
 			}
 
 			if len(response.Choices) == 0 {
-				logger.Println("Empty response")
+				logger.Debug("llm", esn, "empty response")
 				return
 			}
 
@@ -455,7 +453,7 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 			respSlice := fullRespSlice
 			if len(respSlice)-1 < numInResp {
 				if !isDone {
-					logger.Println("Waiting for more content from LLM...")
+					logger.Debug("llm", esn, "waiting for more content from LLM...")
 					for range speakReady {
 						respSlice = fullRespSlice
 						break
@@ -467,7 +465,7 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 			if interrupted {
 				break
 			}
-			logger.Println(respSlice[numInResp])
+			logger.Debug("llm", esn, respSlice[numInResp])
 			acts := GetActionsFromString(respSlice[numInResp])
 			nChat[len(nChat)-1].Content = fullRespText
 			disconnect = PerformActions(nChat, acts, robot, stopStop)
@@ -565,7 +563,7 @@ func KGSim(esn string, textToSay string) error {
 			for {
 				select {
 				case <-stop:
-					logger.Println("KGSim: releasing behavior control (interrupt)")
+					logger.Debug("llm", esn, "KGSim: releasing behavior control (interrupt)")
 					if err := r.Send(
 						&vectorpb.BehaviorControlRequest{
 							RequestType: &vectorpb.BehaviorControlRequest_ControlRelease{
@@ -625,7 +623,7 @@ func KGSim(esn string, textToSay string) error {
 					},
 				)
 				if err != nil {
-					logger.Println("KG SayText error: " + err.Error())
+					logger.Error("llm", esn, "KG SayText error: "+err.Error())
 					stop <- true
 					break
 				}

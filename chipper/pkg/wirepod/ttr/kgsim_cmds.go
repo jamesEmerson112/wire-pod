@@ -168,7 +168,7 @@ func CreatePrompt(origPrompt string, model string, isKG bool) string {
 		}
 	}
 	if os.Getenv("DEBUG_PRINT_PROMPT") == "true" {
-		logger.Println(prompt)
+		logger.Debug("llm", "", prompt)
 	}
 	return prompt
 }
@@ -225,7 +225,7 @@ func CmdParamToAction(cmd, param string) RobotAction {
 			}
 		}
 	}
-	logger.Println("LLM tried to do a command which doesn't exist: " + cmd + " (param: " + param + ")")
+	logger.Debug("llm", "", "LLM tried to do a command which doesn't exist: "+cmd+" (param: "+param+")")
 	return RobotAction{
 		Action: -1,
 	}
@@ -248,7 +248,7 @@ func DoPlayAnimation(animation string, robot *vector.Vector) error {
 			return nil
 		}
 	}
-	logger.Println("Animation provided by LLM doesn't exist: " + animation)
+	logger.Debug("llm", robot.Cfg.SerialNo, "animation provided by LLM doesn't exist: "+animation)
 	return nil
 }
 
@@ -271,17 +271,17 @@ func DoPlayAnimationWI(animation string, robot *vector.Vector) error {
 			return nil
 		}
 	}
-	logger.Println("Animation provided by LLM doesn't exist: " + animation)
+	logger.Debug("llm", robot.Cfg.SerialNo, "animation provided by LLM doesn't exist: "+animation)
 	return nil
 }
 
 func DoPlaySound(sound string, robot *vector.Vector) error {
 	for _, soundThing := range soundMap {
 		if sound == soundThing[0] {
-			logger.Println("Would play sound")
+			logger.Debug("llm", robot.Cfg.SerialNo, "would play sound")
 		}
 	}
-	logger.Println("Sound provided by LLM doesn't exist: " + sound)
+	logger.Debug("llm", robot.Cfg.SerialNo, "sound provided by LLM doesn't exist: "+sound)
 	return nil
 }
 
@@ -345,7 +345,7 @@ func DoSayText_OpenAI(robot *vector.Vector, input string) error {
 		ResponseFormat: openai.SpeechResponseFormatPcm,
 	})
 	if err != nil {
-		logger.Println(err)
+		logger.Error("llm", robot.Cfg.SerialNo, err.Error())
 		return err
 	}
 	speechBytes, _ := io.ReadAll(resp)
@@ -398,7 +398,7 @@ func DoGetImage(msgs []openai.ChatCompletionMessage, param string, robot *vector
 			break
 		}
 	}()
-	logger.Println("Get image here...")
+	logger.Debug("llm", robot.Cfg.SerialNo, "get image here...")
 	// get image
 	robot.Conn.EnableMirrorMode(context.Background(), &vectorpb.EnableMirrorModeRequest{
 		Enable: true,
@@ -496,9 +496,9 @@ func DoGetImage(msgs []openai.ChatCompletionMessage, param string, robot *vector
 	}
 	if vars.APIConfig.Knowledge.Provider == "openai" {
 		aireq.Model = openai.GPT4oMini
-		logger.Println("Using " + aireq.Model)
+		logger.Debug("llm", robot.Cfg.SerialNo, "using "+aireq.Model)
 	} else {
-		logger.Println("Using " + vars.APIConfig.Knowledge.Model)
+		logger.Debug("llm", robot.Cfg.SerialNo, "using "+vars.APIConfig.Knowledge.Model)
 		aireq.Model = vars.APIConfig.Knowledge.Model
 	}
 	if stopImaging {
@@ -507,18 +507,16 @@ func DoGetImage(msgs []openai.ChatCompletionMessage, param string, robot *vector
 	stream, err := c.CreateChatCompletionStream(ctx, aireq)
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") && vars.APIConfig.Knowledge.Provider == "openai" {
-			logger.Println("GPT-4 model cannot be accessed with this API key. You likely need to add more than $5 dollars of funds to your OpenAI account.")
-			logger.LogUI("GPT-4 model cannot be accessed with this API key. You likely need to add more than $5 dollars of funds to your OpenAI account.")
+			logger.Warn("llm", robot.Cfg.SerialNo, "GPT-4 not accessible with this key; add credit to the OpenAI account")
 			aireq.Model = openai.GPT3Dot5Turbo
-			logger.Println("Falling back to " + aireq.Model)
-			logger.LogUI("Falling back to " + aireq.Model)
+			logger.Warn("llm", robot.Cfg.SerialNo, "falling back to "+aireq.Model)
 			stream, err = c.CreateChatCompletionStream(ctx, aireq)
 			if err != nil {
-				logger.Println("OpenAI still not returning a response even after falling back. Erroring.")
+				logger.Error("llm", robot.Cfg.SerialNo, "openai still not returning a response after falling back")
 				return
 			}
 		} else {
-			logger.Println("LLM error: " + err.Error())
+			logger.Error("llm", robot.Cfg.SerialNo, "LLM error: "+err.Error())
 			return
 		}
 	}
@@ -538,7 +536,7 @@ func DoGetImage(msgs []openai.ChatCompletionMessage, param string, robot *vector
 					newStr = newStr + " " + str
 				}
 				if strings.TrimSpace(newStr) != strings.TrimSpace(fullfullRespText) {
-					logger.Println("LLM debug: there is content after the last punctuation mark")
+					logger.Debug("llm", robot.Cfg.SerialNo, "LLM debug: there is content after the last punctuation mark")
 					extraBit := strings.TrimPrefix(fullRespText, newStr)
 					fullRespSlice = append(fullRespSlice, extraBit)
 				}
@@ -550,13 +548,13 @@ func DoGetImage(msgs []openai.ChatCompletionMessage, param string, robot *vector
 						},
 						robot.Cfg.SerialNo)
 				}
-				logger.LogUI("LLM response for " + robot.Cfg.SerialNo + ": " + newStr)
-				logger.Println("LLM stream finished")
+				logger.Info("llm", robot.Cfg.SerialNo, "response: "+newStr)
+				logger.Debug("llm", robot.Cfg.SerialNo, "LLM stream finished")
 				return
 			}
 
 			if err != nil {
-				logger.Println("Stream error: " + err.Error())
+				logger.Error("llm", robot.Cfg.SerialNo, "stream error: "+err.Error())
 				return
 			}
 			fullfullRespText = fullfullRespText + removeSpecialCharacters(response.Choices[0].Delta.Content)
@@ -594,7 +592,7 @@ func DoGetImage(msgs []openai.ChatCompletionMessage, param string, robot *vector
 		respSlice := fullRespSlice
 		if len(respSlice)-1 < numInResp {
 			if !isDone {
-				logger.Println("Waiting for more content from LLM...")
+				logger.Debug("llm", robot.Cfg.SerialNo, "waiting for more content from LLM...")
 				for range speakReady {
 					respSlice = fullRespSlice
 					break
@@ -603,7 +601,7 @@ func DoGetImage(msgs []openai.ChatCompletionMessage, param string, robot *vector
 				break
 			}
 		}
-		logger.Println(respSlice[numInResp])
+		logger.Debug("llm", robot.Cfg.SerialNo, respSlice[numInResp])
 		acts := GetActionsFromString(respSlice[numInResp])
 		PerformActions(msgs, acts, robot, stopStop)
 		numInResp = numInResp + 1
@@ -670,7 +668,7 @@ func StartAnim_Queue(esn string) {
 		if q.ESN == esn {
 			if q.AnimCurrentlyPlaying {
 				for range AnimationQueues[i].AnimDone {
-					logger.Println("(waiting for animation to be done...)")
+					logger.Debug("llm", esn, "(waiting for animation to be done...)")
 					break
 				}
 			} else {
