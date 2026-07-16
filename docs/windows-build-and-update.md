@@ -23,8 +23,10 @@ powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Deploy
 `chipper/webroot` into the install dir, suffixes the `version` file with `-custom`,
 relaunches, and waits for `http://localhost:8080/api/is_running` to return `true`.
 
-Prereqs on PATH: `go`, `gcc`, `windres`, `gendef`, `dlltool` (mingw-w64), `git` (plus
-`cmake` only if the opus-from-source fallback is reached). Override defaults with
+Prereqs on PATH: `go`, `gcc`, `windres`, `git`. Optional: `gendef`+`dlltool` enable the
+import-lib route; without them the script links directly against the installed DLLs
+(`-l:libopus-0.dll`), needing no extra tools (plus `cmake` only if the opus-from-source
+fallback is reached). Override defaults with
 `-WirePodDir`, `-RepoDir`, `-LibsDir`, `-InstallDir`. The rest of this doc explains the
 manual steps the script performs.
 

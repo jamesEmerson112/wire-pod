@@ -14,8 +14,10 @@
 # Usage (build + deploy, elevated / "Run as administrator"):
 #   powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Deploy
 #
-# Prereqs on PATH: go, gcc, windres, gendef, dlltool (mingw-w64), git. cmake is only
-# needed if the opus source fallback is reached.
+# Prereqs on PATH: go, gcc, windres, git. Optional: gendef + dlltool (mingw-w64-tools)
+# enable the import-lib route; without them the linker links directly against the
+# installed DLLs (-l:libopus-0.dll), which needs no extra tools. cmake is only needed
+# if the opus source fallback is reached.
 
 param(
     [switch]$Deploy,
@@ -49,8 +51,15 @@ function Assert-Tool([string]$name) {
 
 function Assert-Tools {
     Write-Host "Checking toolchain ..." -ForegroundColor Cyan
-    foreach ($t in @('go', 'gcc', 'windres', 'gendef', 'dlltool', 'git')) {
+    foreach ($t in @('go', 'gcc', 'windres', 'git')) {
         Assert-Tool $t
+    }
+    $script:HaveImpTools = $true
+    foreach ($t in @('gendef', 'dlltool')) {
+        if ($null -eq (Get-Command $t -ErrorAction SilentlyContinue)) {
+            $script:HaveImpTools = $false
+            Write-Host "  --  $t not found (optional); will link directly against DLLs" -ForegroundColor DarkGray
+        }
     }
 }
 
@@ -130,7 +139,7 @@ function Ensure-OpusHeaders([string]$incDest) {
     }
 }
 
-function Write-OpusPc {
+function Write-OpusPc([string]$libsFlag) {
     $opusDir   = Join-Path $LibsDir 'opus'
     $pcPath    = Join-Path $opusDir 'lib\pkgconfig\opus.pc'
     $prefixFwd = ($opusDir -replace '\\', '/')
@@ -142,36 +151,49 @@ includedir=`${prefix}/include
 Name: Opus
 Description: Opus IETF audio codec
 Version: 0
-Libs: -L`${libdir} -lopus
+Libs: -L`${libdir} $libsFlag
 Cflags: -I`${includedir}/opus -I`${includedir}
 "@
     [System.IO.File]::WriteAllText($pcPath, $pc)
-    Write-Host "  OK  wrote opus.pc" -ForegroundColor Green
+    Write-Host "  OK  wrote opus.pc ($libsFlag)" -ForegroundColor Green
 }
 
 function Ensure-OpusLib {
     $opusDir = Join-Path $LibsDir 'opus'
     $impLib  = Join-Path $opusDir 'libopus.dll.a'
+    $dllCopy = Join-Path $opusDir 'libopus-0.dll'
     $incDest = Join-Path $opusDir 'include\opus'
+    $libsFlag = '-lopus'
     if (Test-Path $impLib) {
         Write-Host "  OK  opus import lib present" -ForegroundColor DarkGray
+    } elseif (Test-Path $dllCopy) {
+        Write-Host "  OK  opus DLL present for direct linking" -ForegroundColor DarkGray
+        $libsFlag = '-l:libopus-0.dll'
     } else {
         $installedDll = Join-Path $InstallDir 'libopus-0.dll'
         $prefixDllA   = Join-Path $ScratchLibs 'prefix\opus\lib\libopus.dll.a'
-        if (Test-Path $installedDll) {
+        if ((Test-Path $installedDll) -and $script:HaveImpTools) {
             Write-Host "Generating opus import lib from installed libopus-0.dll ..." -ForegroundColor Cyan
             New-MinGWImportLib $installedDll 'libopus-0.dll' $impLib
+            Write-Host "  OK  opus import lib -> $impLib" -ForegroundColor Green
+        } elseif (Test-Path $installedDll) {
+            # No gendef/dlltool: mingw ld links directly against the DLL via -l:filename.
+            Write-Host "Copying installed libopus-0.dll for direct linking ..." -ForegroundColor Cyan
+            Copy-Item $installedDll $dllCopy -Force
+            $libsFlag = '-l:libopus-0.dll'
+            Write-Host "  OK  opus DLL -> $dllCopy" -ForegroundColor Green
         } elseif (Test-Path $prefixDllA) {
             Write-Host "Using scratchpad opus import lib ..." -ForegroundColor Cyan
             Copy-Item $prefixDllA $impLib -Force
+            Write-Host "  OK  opus import lib -> $impLib" -ForegroundColor Green
         } else {
             Write-Host "Building opus from source (cmake fallback) ..." -ForegroundColor Yellow
             Build-OpusFromSource $impLib $incDest
+            Write-Host "  OK  opus import lib -> $impLib" -ForegroundColor Green
         }
-        Write-Host "  OK  opus import lib -> $impLib" -ForegroundColor Green
     }
     Ensure-OpusHeaders $incDest
-    Write-OpusPc
+    Write-OpusPc $libsFlag
 }
 
 function Ensure-OggLib {
@@ -183,7 +205,7 @@ function Ensure-OggLib {
     } else {
         $installedDll = Join-Path $InstallDir 'libogg-0.dll'
         $prefixDllA   = Join-Path $ScratchLibs 'prefix\ogg\lib\libogg.dll.a'
-        if (Test-Path $installedDll) {
+        if ((Test-Path $installedDll) -and $script:HaveImpTools) {
             Write-Host "Generating ogg import lib from installed libogg-0.dll ..." -ForegroundColor Cyan
             New-MinGWImportLib $installedDll 'libogg-0.dll' $impLib
             Write-Host "  OK  ogg import lib -> $impLib" -ForegroundColor Green
@@ -237,7 +259,7 @@ function Ensure-Vosk {
     $installHdr = Join-Path $InstallDir 'vosk_api.h'
     $prefixVosk = Join-Path $ScratchLibs 'prefix\vosk'
     $zip        = Join-Path $ScratchLibs 'vosk-dl\vosk-win64-0.3.45.zip'
-    if ((Test-Path $installDll) -and (Test-Path $installHdr)) {
+    if ((Test-Path $installDll) -and (Test-Path $installHdr) -and $script:HaveImpTools) {
         Write-Host "Generating vosk import lib from installed libvosk.dll ..." -ForegroundColor Cyan
         Copy-Item $installHdr $voskHdr -Force
         Copy-Item $installDll (Join-Path $voskDir 'libvosk.dll') -Force
