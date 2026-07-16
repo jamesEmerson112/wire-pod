@@ -83,6 +83,13 @@ Already fixed in this fork (extract the minimal diff when PRing):
   `req.Items` as a second timestamped line; merge into one line.
 - **ANSI escape leak** — `sdkapp/server.go` logs `\033[1;36m...` which renders as garbage
   in the web UI log; strip escapes for the UI buffers.
+- **Unpunctuated LLM response dropped** — `ttr/kgsim.go` EOF branch reports
+  "no response" when the answer never contained `.?!` (e.g. one-word replies);
+  fix: flush the remaining buffer as a final sentence at EOF.
+- **LLM stream goroutine death hangs the caller** — mid-stream error `return`s and an
+  empty-choices chunk `return`s (should `continue`) without signaling `successIntent`/
+  `speakReady`, leaving StreamingKGSim's caller and speaking loop blocked forever
+  (`ttr/kgsim.go` ~:342-350).
 
 Known upstream bugs, NOT yet fixed in this fork (verify still present before PRing):
 - Unknown/empty `Knowledge.Provider` → nil `*openai.Client` panic (no `default:` in the
