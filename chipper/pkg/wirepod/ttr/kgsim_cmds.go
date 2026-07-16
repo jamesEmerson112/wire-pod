@@ -170,6 +170,7 @@ func CreatePrompt(origPrompt string, model string, isKG bool) string {
 	if os.Getenv("DEBUG_PRINT_PROMPT") == "true" {
 		logger.Debug("llm", "", prompt)
 	}
+	logger.Debug("llm", "", "LLM system prompt: "+prompt)
 	return prompt
 }
 
