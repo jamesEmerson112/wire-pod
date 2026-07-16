@@ -51,7 +51,7 @@ func Init() error {
 // STT funcs should be defined as func(sr.SpeechRequest) (string, error)
 
 func STT(req sr.SpeechRequest) (string, error) {
-	logger.Println("(Bot " + req.Device + ", Coqui) Processing...")
+	logger.Debug("stt", req.Device, "coqui: processing")
 	speechIsDone := false
 	coquiInstance, _ := asticoqui.New("../stt/model.tflite")
 	if _, err := os.Stat("../stt/large_vocabulary.scorer"); err == nil {
@@ -76,6 +76,6 @@ func STT(req sr.SpeechRequest) (string, error) {
 		}
 	}
 	transcribedText, _ := coquiStream.Finish()
-	logger.Println("Bot " + req.Device + " Transcribed text: " + transcribedText)
+	logger.Info("stt", req.Device, "transcribed: "+transcribedText)
 	return transcribedText, nil
 }

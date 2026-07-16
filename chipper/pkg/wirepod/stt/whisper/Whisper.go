@@ -108,7 +108,7 @@ func makeOpenAIReq(in []byte) string {
 }
 
 func STT(req sr.SpeechRequest) (string, error) {
-	logger.Println("(Bot " + req.Device + ", Whisper) Processing...")
+	logger.Debug("stt", req.Device, "whisper: processing")
 	speechIsDone := false
 	var err error
 	for {
@@ -131,6 +131,6 @@ func STT(req sr.SpeechRequest) (string, error) {
 	pcmBuf := pcm2wav(pcmBufTo.BytesReader())
 
 	transcribedText := strings.ToLower(makeOpenAIReq(pcmBuf))
-	logger.Println("Bot " + req.Device + " Transcribed text: " + transcribedText)
+	logger.Info("stt", req.Device, "transcribed: "+transcribedText)
 	return transcribedText, nil
 }

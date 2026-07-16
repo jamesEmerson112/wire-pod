@@ -60,7 +60,7 @@ func STT(req sr.SpeechRequest) (transcribedText string, err error) {
 	BotNumMu.Lock()
 	BotNum = BotNum + 1
 	BotNumMu.Unlock()
-	logger.Println("(Bot " + req.Device + ", Leopard) Processing...")
+	logger.Debug("stt", req.Device, "leopard: processing")
 	var leopardSTT leopard.Leopard
 	speechIsDone := false
 	if BotNum > picovoiceInstances {
@@ -90,7 +90,7 @@ func STT(req sr.SpeechRequest) (transcribedText string, err error) {
 		logger.Println(err)
 	}
 	transcribedText = strings.ToLower(transcribedTextPre)
-	logger.Println("Bot " + req.Device + " Transcribed text: " + transcribedText)
+	logger.Info("stt", req.Device, "transcribed: "+transcribedText)
 	BotNumMu.Lock()
 	BotNum = BotNum - 1
 	BotNumMu.Unlock()

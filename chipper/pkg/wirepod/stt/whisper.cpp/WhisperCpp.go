@@ -76,7 +76,7 @@ func Init() error {
 }
 
 func STT(req sr.SpeechRequest) (string, error) {
-	logger.Println("(Bot " + req.Device + ", Whisper) Processing...")
+	logger.Debug("stt", req.Device, "whisper.cpp: processing")
 	speechIsDone := false
 	var err error
 	for {
@@ -95,7 +95,7 @@ func STT(req sr.SpeechRequest) (string, error) {
 		return "", err
 	}
 	transcribedText = strings.ToLower(transcribedText)
-	logger.Println("Bot " + req.Device + " Transcribed text: " + transcribedText)
+	logger.Info("stt", req.Device, "transcribed: "+transcribedText)
 	return transcribedText, nil
 }
 
