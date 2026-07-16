@@ -66,3 +66,34 @@ Config changes from the web UI call `initwirepod.RestartServer()` to bounce the 
 - **Lua scripting** (`pkg/scripting`): gopher-lua bindings exposing robot behavior control (sayText, playAnimation, moveWheels, HTTP requests, etc.).
 - **Web UI** (`chipper/webroot/`): plain HTML/JS/CSS served directly — no build step or framework.
 - Robot SDK interactions go through `github.com/fforchino/vector-go-sdk`; LLM responses through `github.com/sashabaranov/go-openai`.
+
+## Upstream PR candidates (kercre123/wire-pod)
+
+Small, self-contained fixes to offer upstream — one small PR at a time, starting with the
+most undeniable. NEVER PR a fork branch directly: cherry-pick onto a clean branch cut from
+`upstream/main` (this fork's main carries personal docs/scripts and `build-windows.ps1`
+has user-specific default paths). Consider opening an issue first for anything larger.
+
+Already fixed in this fork (extract the minimal diff when PRing):
+- **Logger data race** — upstream `pkg/logger` has no mutex; concurrent gRPC/goroutine
+  writers vs. HTTP readers on `LogArray`/`LogTrayArray`. Minimal fix: one `sync.Mutex`.
+- **ble.js dead `GetLog` timer** — `showBotAuth()` references a variable that doesn't stop
+  polling (upstream equivalent: log polling never stops when leaving the Logs tab).
+- **jdocs two-line ReadDocs log** — `servers/jdocs/server.go` logs a header then dumps
+  `req.Items` as a second timestamped line; merge into one line.
+- **ANSI escape leak** — `sdkapp/server.go` logs `\033[1;36m...` which renders as garbage
+  in the web UI log; strip escapes for the UI buffers.
+
+Known upstream bugs, NOT yet fixed in this fork (verify still present before PRing):
+- Unknown/empty `Knowledge.Provider` → nil `*openai.Client` panic (no `default:` in the
+  provider switch, `ttr/kgsim.go` ~:242-257).
+- LLM command without `||` separator → index-out-of-range panic
+  (`ttr/kgsim_cmds.go` GetActionsFromString ~:203).
+- `DoSayText` calls `removeSpecialCharacters` but discards the result
+  (`ttr/kgsim_cmds.go` ~:291).
+- `ActionNewRequest` and `ActionPlaySound` are both `= 4` (`ttr/kgsim_cmds.go` ~:29-32);
+  latent, masked because playSound is disabled.
+- jdocs ReadDocs indexes `req.Items[0]` without an empty check
+  (`servers/jdocs/server.go` ~:76).
+- `GET /api/get_kg_api` returns the LLM API key in plaintext to any LAN client
+  (`config-ws/webserver.go`) — needs an upstream design conversation, not a drive-by fix.
