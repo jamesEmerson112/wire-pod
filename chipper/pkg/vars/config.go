@@ -3,6 +3,7 @@ package vars
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 
 	"github.com/kercre123/wire-pod/chipper/pkg/logger"
 )
@@ -46,6 +47,11 @@ type apiConfig struct {
 		EPConfig bool   `json:"epconfig"`
 		Port     string `json:"port"`
 	} `json:"server"`
+	Battery struct {
+		// battery percent at/below which a bot is sent to its charger
+		// nil = default (25), 0 = disabled
+		GoHomePercent *int `json:"gohome_percent"`
+	} `json:"battery"`
 	HasReadFromEnv   bool `json:"hasreadfromenv"`
 	PastInitialSetup bool `json:"pastinitialsetup"`
 }
@@ -75,6 +81,15 @@ func CreateConfigFromEnv() {
 		APIConfig.Knowledge.Key = os.Getenv("KNOWLEDGE_KEY")
 	} else {
 		APIConfig.Knowledge.Enable = false
+	}
+	if percentStr := os.Getenv("GOHOME_BATTERY_PERCENT"); percentStr != "" {
+		if percent, err := strconv.Atoi(percentStr); err == nil {
+			APIConfig.Battery.GoHomePercent = &percent
+		}
+	}
+	if APIConfig.Battery.GoHomePercent == nil {
+		defaultPercent := 25
+		APIConfig.Battery.GoHomePercent = &defaultPercent
 	}
 	WriteSTT()
 	APIConfig.HasReadFromEnv = true
@@ -127,6 +142,11 @@ func ReadConfig() {
 		if APIConfig.Knowledge.Model == "meta-llama/Llama-2-70b-chat-hf" {
 			logger.Println("Setting Together model to Llama3")
 			APIConfig.Knowledge.Model = "meta-llama/Llama-3-70b-chat-hf"
+		}
+
+		if APIConfig.Battery.GoHomePercent == nil {
+			defaultPercent := 25
+			APIConfig.Battery.GoHomePercent = &defaultPercent
 		}
 
 		writeBytes, _ := json.Marshal(APIConfig)
