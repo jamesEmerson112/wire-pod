@@ -4,6 +4,10 @@ const intentsJson = JSON.parse(
 
 let logTimer = null;
 let logSince = 0;
+let logEntries = [];
+let logSearchTimer = null;
+let lastRenderedDate = null;
+const seenComps = {};
 const LOG_MAX_ROWS = 500;
 
 const getE = (element) => document.getElementById(element);
@@ -507,13 +511,61 @@ function updateColor(id) {
 }
 
 
-function appendLogRow(e) {
-  const tbody = getE("logTableBody");
+function logTimeString(t) {
+  const d = new Date(t);
+  const two = (n) => String(n).padStart(2, "0");
+  return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
+}
+
+function logDateString(t) {
+  return new Date(t).toDateString();
+}
+
+function matchesFilters(e) {
+  const comp = getE("logComp").value;
+  if (comp === "none" && e.comp) {
+    return false;
+  }
+  if (comp !== "" && comp !== "none" && e.comp !== comp) {
+    return false;
+  }
+  const q = getE("logSearch").value.trim().toLowerCase();
+  if (q !== "") {
+    const hay = (e.msg + " " + (e.comp || "") + " " + (e.bot || "") + " " + e.level).toLowerCase();
+    if (hay.indexOf(q) === -1) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function registerComp(comp) {
+  if (!comp || seenComps[comp]) {
+    return;
+  }
+  seenComps[comp] = true;
+  const opt = document.createElement("option");
+  opt.value = comp;
+  opt.textContent = comp;
+  getE("logComp").appendChild(opt);
+}
+
+function makeDateRow(t) {
+  const tr = document.createElement("tr");
+  tr.className = "log-date-row";
+  const td = document.createElement("td");
+  td.colSpan = 5;
+  td.textContent = "— " + logDateString(t) + " —";
+  tr.appendChild(td);
+  return tr;
+}
+
+function makeLogRow(e) {
   const tr = document.createElement("tr");
 
   const tdTime = document.createElement("td");
   tdTime.className = "log-time";
-  tdTime.textContent = new Date(e.t).toLocaleTimeString();
+  tdTime.textContent = logTimeString(e.t);
   tr.appendChild(tdTime);
 
   const tdLevel = document.createElement("td");
@@ -522,12 +574,13 @@ function appendLogRow(e) {
   tr.appendChild(tdLevel);
 
   const tdComp = document.createElement("td");
-  tdComp.className = "comp-" + (e.comp || "none");
-  tdComp.textContent = e.comp || "";
+  tdComp.className = e.comp ? "comp-" + e.comp : "log-empty";
+  tdComp.textContent = e.comp || "—";
   tr.appendChild(tdComp);
 
   const tdBot = document.createElement("td");
-  tdBot.textContent = e.bot || "";
+  tdBot.className = e.bot ? "log-bot" : "log-bot log-empty";
+  tdBot.textContent = e.bot || "—";
   tr.appendChild(tdBot);
 
   const tdMsg = document.createElement("td");
@@ -535,7 +588,35 @@ function appendLogRow(e) {
   tdMsg.textContent = e.msg;
   tr.appendChild(tdMsg);
 
-  tbody.appendChild(tr);
+  return tr;
+}
+
+function appendRendered(tbody, e) {
+  const ds = logDateString(e.t);
+  if (lastRenderedDate !== null && ds !== lastRenderedDate) {
+    tbody.appendChild(makeDateRow(e.t));
+  }
+  lastRenderedDate = ds;
+  tbody.appendChild(makeLogRow(e));
+}
+
+function scrollLogBottom() {
+  if (getE("logscrollbottom").checked) {
+    const wrap = getE("logTableWrap");
+    wrap.scrollTop = wrap.scrollHeight;
+  }
+}
+
+function rebuildLogTable() {
+  const tbody = getE("logTableBody");
+  tbody.innerHTML = "";
+  lastRenderedDate = null;
+  logEntries.forEach((e) => {
+    if (matchesFilters(e)) {
+      appendRendered(tbody, e);
+    }
+  });
+  scrollLogBottom();
 }
 
 function fetchLogs(full) {
@@ -544,22 +625,35 @@ function fetchLogs(full) {
   fetch("/api/get_logs_json?level=" + level + "&since=" + since)
     .then((response) => response.json())
     .then((logs) => {
-      if (!logs) {
+      if (!logs || logs.length === 0) {
         return;
       }
+      let trimmed = false;
       logs.forEach((e) => {
-        appendLogRow(e);
+        logEntries.push(e);
+        registerComp(e.comp);
         if (e.t > logSince) {
           logSince = e.t;
         }
       });
-      const tbody = getE("logTableBody");
-      while (tbody.childElementCount > LOG_MAX_ROWS) {
-        tbody.removeChild(tbody.firstElementChild);
+      while (logEntries.length > LOG_MAX_ROWS) {
+        logEntries.shift();
+        trimmed = true;
       }
-      if (getE("logscrollbottom").checked) {
-        const wrap = getE("logTableWrap");
-        wrap.scrollTop = wrap.scrollHeight;
+      if (trimmed || full) {
+        rebuildLogTable();
+      } else {
+        const tbody = getE("logTableBody");
+        let appended = false;
+        logs.forEach((e) => {
+          if (matchesFilters(e)) {
+            appendRendered(tbody, e);
+            appended = true;
+          }
+        });
+        if (appended) {
+          scrollLogBottom();
+        }
       }
     })
     .catch(() => {
@@ -567,14 +661,26 @@ function fetchLogs(full) {
     });
 }
 
+function resetLogView() {
+  logSince = 0;
+  logEntries = [];
+  lastRenderedDate = null;
+  getE("logTableBody").innerHTML = "";
+}
+
 function showLog() {
   toggleVisibility(["section-intents", "section-log", "section-botauth", "section-version", "section-uicustomizer"], "section-log", "icon-Logs");
-  logSince = 0;
-  getE("logTableBody").innerHTML = "";
+  resetLogView();
   getE("logLevel").onchange = () => {
-    logSince = 0;
-    getE("logTableBody").innerHTML = "";
+    resetLogView();
     fetchLogs(true);
+  };
+  getE("logComp").onchange = rebuildLogTable;
+  getE("logSearch").oninput = () => {
+    if (logSearchTimer !== null) {
+      clearTimeout(logSearchTimer);
+    }
+    logSearchTimer = setTimeout(rebuildLogTable, 150);
   };
   fetchLogs(true);
   logTimer = setInterval(() => fetchLogs(false), 750);

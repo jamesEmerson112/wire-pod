@@ -162,7 +162,14 @@
               <option value="info" selected="selected">Info</option>
               <option value="warn">Warn</option>
               <option value="error">Error</option>
-            </select><br />
+            </select>
+            <label class="checkbox-label" for="logComp">Comp:</label>
+            <select id="logComp">
+              <option value="">All</option>
+              <option value="none">(none)</option>
+            </select>
+            <label class="checkbox-label" for="logSearch">Search:</label>
+            <input id="logSearch" type="text" placeholder="filter..." autocomplete="off" /><br />
             <input id="logscrollbottom" name="logscrollbottom" type="checkbox" checked />
             <label class="checkbox-label" for="logscrollbottom">Scroll to bottom</label>
           </div>

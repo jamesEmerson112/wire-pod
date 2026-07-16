@@ -596,7 +596,8 @@ input[type='checkbox']:checked:after {
 
 /* ===== Log table ===== */
 .log-table-wrap {
-  height: 280px;
+  height: 65vh;
+  min-height: 280px;
   overflow-y: auto;
   border: 2px solid var(--fg-color);
   background-color: #2d2d2d;
@@ -604,36 +605,67 @@ input[type='checkbox']:checked:after {
 
 #logTable {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
-  font-family: 'IBMVGA', monospace;
+  font-family: Consolas, 'Cascadia Mono', Menlo, monospace;
   font-size: 0.85em;
   color: #ffffff;
   text-align: left;
 }
+
+#logTable th:nth-child(1) { width: 76px; }
+#logTable th:nth-child(2) { width: 56px; }
+#logTable th:nth-child(3) { width: 64px; }
+#logTable th:nth-child(4) { width: 84px; }
 
 #logTable thead th {
   position: sticky;
   top: 0;
   background-color: #1e1e1e;
   color: var(--fg-color);
-  padding: 1px 6px;
+  padding: 2px 8px;
   z-index: 1;
 }
 
 #logTable td {
-  padding: 1px 6px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+
+#logTable td.log-msg {
   white-space: pre-wrap;
   word-break: break-word;
-  vertical-align: top;
+}
+
+#logTable tbody tr:not(.log-date-row):hover td {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.log-date-row td {
+  text-align: center;
+  color: #777;
+  background-color: #242424;
+  border-top: 1px solid #3a3a3a;
+  border-bottom: 1px solid #3a3a3a;
 }
 
 .log-time {
   color: #888;
-  white-space: nowrap;
 }
 
-.log-msg {
-  width: 100%;
+.log-empty {
+  color: #555;
+}
+
+#logSearch {
+  background-color: #2d2d2d;
+  color: #ffffff;
+  border: 1px solid var(--fg-color);
+  padding: 2px 6px;
+  font-family: Consolas, 'Cascadia Mono', Menlo, monospace;
 }
 
 .level-DEBUG { color: #888; }
