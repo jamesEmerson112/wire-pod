@@ -79,7 +79,7 @@ func SetBotGUID(esn string, guid string, guidHash string) error {
 		if strings.EqualFold(esn, robot.Esn) {
 			vars.BotInfo.Robots[num].GUID = guid
 			vars.BotInfo.Robots[num].Activated = true
-			logger.Println("GUID and hash successfully written for " + robot.Esn)
+			logger.Info("token", robot.Esn, "GUID and hash written")
 			matched = true
 			break
 		}
@@ -89,7 +89,7 @@ func SetBotGUID(esn string, guid string, guidHash string) error {
 	}
 	writeBytes, err := json.Marshal(vars.BotInfo)
 	if err != nil {
-		logger.Println(err)
+		logger.Error("token", "", "marshal bot info: "+err.Error())
 		return err
 	}
 	os.WriteFile(vars.BotInfoPath, writeBytes, 0644)
@@ -114,8 +114,7 @@ func WriteTokenHash(esn string, tokenHash string) error {
 	tokenJson.ClientTokens = append(tokenJson.ClientTokens, clientToken)
 	jdocJsoc, err := json.Marshal(tokenJson)
 	if err != nil {
-		logger.Println("Error marshaling token hash json")
-		logger.Println(err)
+		logger.Error("token", "", "Error marshaling token hash json: "+err.Error())
 	}
 	jdoc.JsonDoc = string(jdocJsoc)
 	var ajdoc vars.AJdoc
@@ -129,19 +128,19 @@ func WriteTokenHash(esn string, tokenHash string) error {
 }
 
 func RemoveFromSecondStore(index int) {
-	logger.Println("Removing " + SecondaryTokenStore[index][0] + " from temporary token-hash store")
+	logger.Debug("token", SecondaryTokenStore[index][0], "Removing from temporary token-hash store")
 	SecondaryTokenStore = append(SecondaryTokenStore[:index], SecondaryTokenStore[index+1:]...)
 }
 
 func RemoveFromPrimaryStore(index int) {
-	logger.Println("Removing " + TokenHashStore[index][0] + " from temporary token-hash store")
+	logger.Debug("token", "", "Removing "+TokenHashStore[index][0]+" from temporary token-hash store")
 	TokenHashStore = append(TokenHashStore[:index], TokenHashStore[index+1:]...)
 }
 
 func RemoveFromSessionStore(index int) {
 	//var SessionWriteStoreNames [][2]string
 	//var SessionWriteStoreCerts [][]byte
-	logger.Println("Removing " + SessionWriteStoreNames[index][0] + " from cert-write store")
+	logger.Debug("token", "", "Removing "+SessionWriteStoreNames[index][0]+" from cert-write store")
 	SessionWriteStoreNames = append(SessionWriteStoreNames[:index], SessionWriteStoreNames[index+1:]...)
 	SessionWriteStoreCerts = append(SessionWriteStoreCerts[:index], SessionWriteStoreCerts[index+1:]...)
 }
@@ -195,8 +194,8 @@ func CreateJWT(ctx context.Context, skipGuid bool, isPrimary bool) *tokenpb.Toke
 	// figure out current time and the time in one month
 	currentTime := time.Now().Format(TimeFormat)
 	expiresAt := time.Now().AddDate(0, 1, 0).Format(TimeFormat)
-	logger.Println("Current time: " + currentTime)
-	logger.Println("Token expires: " + expiresAt)
+	logger.Debug("token", "", "Current time: "+currentTime)
+	logger.Debug("token", "", "Token expires: "+expiresAt)
 
 	// get esn using ip address of request
 	p, _ := peer.FromContext(ctx)
@@ -220,7 +219,7 @@ func CreateJWT(ctx context.Context, skipGuid bool, isPrimary bool) *tokenpb.Toke
 	// create token and hash
 	// if esn is not found, put tokenHash into ram
 	if err == nil && !isPrimary {
-		logger.Println("Found ESN for target " + ipAddr + ": " + esn)
+		logger.Info("token", esn, "matched target "+ipAddr)
 		requestorId = "vic:" + esn
 		if !skipGuid {
 			guid, tokenHash, _ := CreateTokenAndHashedToken()
@@ -230,9 +229,9 @@ func CreateJWT(ctx context.Context, skipGuid bool, isPrimary bool) *tokenpb.Toke
 			clientToken = guid
 		}
 	} else {
-		logger.Println("ESN not found in store or this is an associate primary user request, act as if this is a new robot")
+		logger.Debug("token", "", "ESN not found in store or this is an associate primary user request, act as if this is a new robot")
 		if !skipGuid {
-			logger.Println("Adding " + ipAddr + " to TokenHashStore")
+			logger.Debug("token", "", "Adding "+ipAddr+" to TokenHashStore")
 			guid, tokenHash, _ := CreateTokenAndHashedToken()
 			TokenHashStore = append(TokenHashStore, [3]string{ipAddr, guid, tokenHash})
 			clientToken = guid
@@ -245,11 +244,11 @@ func CreateJWT(ctx context.Context, skipGuid bool, isPrimary bool) *tokenpb.Toke
 	if secondary {
 		SetBotGUID(esn, secondaryGUID, secondaryHash)
 		bundle.ClientToken = secondaryGUID
-		logger.Println("Secondary client: " + secondaryGUID)
+		logger.Debug("token", "", "Secondary client: "+secondaryGUID)
 	}
 
 	requestUUID := GenerateUUID()
-	logger.Println("UUID for this token request: " + requestUUID)
+	logger.Debug("token", "", "UUID for this token request: "+requestUUID)
 
 	// create actual JWT token
 	token := jwt.NewWithClaims(jwt.SigningMethodRS512, jwt.MapClaims{
@@ -271,7 +270,7 @@ func CreateJWT(ctx context.Context, skipGuid bool, isPrimary bool) *tokenpb.Toke
 }
 
 func (s *TokenServer) AssociatePrimaryUser(ctx context.Context, req *tokenpb.AssociatePrimaryUserRequest) (*tokenpb.AssociatePrimaryUserResponse, error) {
-	logger.Println("Token: Incoming Associate Primary User request")
+	logger.Debug("token", "", "Incoming Associate Primary User request")
 	pemBytes, _ := pem.Decode(req.SessionCertificate)
 	cert, _ := x509.ParseCertificate(pemBytes.Bytes)
 	SessionWriteStoreCerts = append(SessionWriteStoreCerts, req.SessionCertificate)
@@ -283,14 +282,14 @@ func (s *TokenServer) AssociatePrimaryUser(ctx context.Context, req *tokenpb.Ass
 }
 
 func (s *TokenServer) AssociateSecondaryClient(ctx context.Context, req *tokenpb.AssociateSecondaryClientRequest) (*tokenpb.AssociateSecondaryClientResponse, error) {
-	logger.Println("Token: Incoming Associate Secondary Client request")
+	logger.Debug("token", "", "Incoming Associate Secondary Client request")
 	return &tokenpb.AssociateSecondaryClientResponse{
 		Data: CreateJWT(ctx, false, false),
 	}, nil
 }
 
 func (s *TokenServer) RefreshToken(ctx context.Context, req *tokenpb.RefreshTokenRequest) (*tokenpb.RefreshTokenResponse, error) {
-	logger.Println("Token: Incoming Refresh Token request")
+	logger.Debug("token", "", "Incoming Refresh Token request")
 	return &tokenpb.RefreshTokenResponse{
 		Data: CreateJWT(ctx, false, false),
 	}, nil

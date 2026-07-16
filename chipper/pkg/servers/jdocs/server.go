@@ -18,8 +18,20 @@ type JdocServer struct {
 	jdocspb.UnimplementedJdocsServer
 }
 
+func esnOf(thing string) string {
+	return strings.TrimPrefix(thing, "vic:")
+}
+
+func itemsToStr(items []*jdocspb.ReadDocsReq_Item) string {
+	var names []string
+	for _, item := range items {
+		names = append(names, item.DocName)
+	}
+	return strings.Join(names, ", ")
+}
+
 func (s *JdocServer) WriteDoc(ctx context.Context, req *jdocspb.WriteDocReq) (*jdocspb.WriteDocResp, error) {
-	logger.Println("Jdocs: Incoming WriteDoc request, Item to write: " + req.DocName + ", Robot ID: " + req.Thing)
+	logger.Info("jdocs", esnOf(req.Thing), "WriteDoc "+req.DocName)
 	var ajdoc vars.AJdoc
 	ajdoc.ClientMetadata = req.Doc.ClientMetadata
 	ajdoc.DocVersion = req.Doc.DocVersion
@@ -34,7 +46,7 @@ func (s *JdocServer) WriteDoc(ctx context.Context, req *jdocspb.WriteDocReq) (*j
 
 	for ind, bot := range vars.BotInfo.Robots {
 		if bot.Esn == esn && bot.IPAddress != ipAddr {
-			logger.Println(esn + "'s IP address has changed to " + ipAddr + ", noting")
+			logger.Info("jdocs", esn, "IP changed to "+ipAddr)
 			vars.BotInfo.Robots[ind].IPAddress = ipAddr
 			writeBytes, _ := json.Marshal(vars.BotInfo)
 			os.WriteFile(vars.BotInfoPath, writeBytes, 0644)
@@ -51,8 +63,7 @@ func (s *JdocServer) ReadDocs(ctx context.Context, req *jdocspb.ReadDocsReq) (*j
 	globalGUIDHash := `{"client_tokens":[{"hash":"J5TAnJTPRCioMExFo5KzH2fHOAXyM5fuO8YRbQSamIsNzymnJ8KDIerFxuJV4qBN","client_name":"","app_id":"","issued_at":"2022-11-26T18:23:08Z","is_primary":true}]}`
 	// global guid now only used in edge cases
 
-	logger.Println("Jdocs: Incoming ReadDocs request, Robot ID: " + req.Thing + ", Item(s) to return: ")
-	logger.Println(req.Items)
+	logger.Debug("jdocs", esnOf(req.Thing), "ReadDocs: "+itemsToStr(req.Items))
 	esn := strings.Split(req.Thing, ":")[1]
 	isAlreadyKnown := IsBotInInfo(esn)
 	p, _ := peer.FromContext(ctx)
@@ -60,7 +71,7 @@ func (s *JdocServer) ReadDocs(ctx context.Context, req *jdocspb.ReadDocsReq) (*j
 
 	for ind, bot := range vars.BotInfo.Robots {
 		if bot.Esn == esn && bot.IPAddress != ipAddr {
-			logger.Println(esn + "'s IP address has changed to " + ipAddr + ", noting")
+			logger.Info("jdocs", esn, "IP changed to "+ipAddr)
 			vars.BotInfo.Robots[ind].IPAddress = ipAddr
 			writeBytes, _ := json.Marshal(vars.BotInfo)
 			os.WriteFile(vars.BotInfoPath, writeBytes, 0644)
@@ -77,23 +88,21 @@ func (s *JdocServer) ReadDocs(ctx context.Context, req *jdocspb.ReadDocsReq) (*j
 		StoreBotInfo(ctx, req.Thing)
 		_, tokenExists := vars.GetJdoc(req.Thing, "vic.AppTokens")
 		if !tokenExists {
-			logger.Println("App tokens jdoc not found for this bot, trying bots in TokenHashStore")
+			logger.Debug("jdocs", esn, "App tokens jdoc not found for this bot, trying bots in TokenHashStore")
 			matched := false
 			botGUID := ""
 			for num, pair := range tokenserver.TokenHashStore {
 				if strings.EqualFold(pair[0], ipAddr) {
 					err := tokenserver.WriteTokenHash(strings.ToLower(strings.TrimSpace(esn)), pair[2])
 					if err != nil {
-						logger.Println("Error writing token hash to vic.AppTokens")
-						logger.Println(err)
+						logger.Error("jdocs", esn, "Error writing token hash to vic.AppTokens: "+err.Error())
 					}
 					err = tokenserver.SetBotGUID(esn, pair[1], pair[2])
 					botGUID = pair[1]
 					if err != nil {
-						logger.Println("Error writing token hash to " + vars.BotInfoPath)
-						logger.Println(err)
+						logger.Error("jdocs", esn, "Error writing token hash to "+vars.BotInfoPath+": "+err.Error())
 					}
-					logger.Println("ReadJdocs: bot " + esn + " matched with IP " + ipAddr + " in token store")
+					logger.Debug("jdocs", esn, "matched with IP "+ipAddr+" in token store")
 					matched = true
 					tokenserver.RemoveFromPrimaryStore(num)
 				}
@@ -104,10 +113,10 @@ func (s *JdocServer) ReadDocs(ctx context.Context, req *jdocspb.ReadDocsReq) (*j
 					sessionMatched = true
 					fullPath := filepath.Join(vars.SDKIniPath, pair[1] + "-" + esn + ".cert")
 					if _, err := os.Stat(vars.SDKIniPath); err != nil {
-						logger.Println("Creating " + vars.SDKIniPath + " directory")
+						logger.Debug("jdocs", esn, "Creating "+vars.SDKIniPath+" directory")
 						os.Mkdir(vars.SDKIniPath, 0755)
 					}
-					logger.Println("Outputting session cert to " + fullPath)
+					logger.Debug("jdocs", esn, "Outputting session cert to "+fullPath)
 					// export to ~/.anki_vector
 					os.WriteFile(fullPath, tokenserver.SessionWriteStoreCerts[num], 0755)
 					// export to ./session-certs
@@ -115,14 +124,14 @@ func (s *JdocServer) ReadDocs(ctx context.Context, req *jdocspb.ReadDocsReq) (*j
 					WriteToIniPrimary(pair[1], esn, botGUID, ipAddr)
 					vars.AddToRInfo(esn, pair[1], ipAddr)
 					tokenserver.RemoveFromSessionStore(num)
-					logger.Println("Session certificate successfully output")
+					logger.Debug("jdocs", esn, "Session certificate successfully output")
 					break
 				}
 			}
-			logger.LogUI("New bot being associated with wire-pod. ESN: " + esn + ", IP: " + ipAddr)
+			logger.Info("jdocs", esn, "New bot associated, IP: "+ipAddr)
 			if !matched {
 				if !isAlreadyKnown {
-					logger.Println("Bot was not known to wire-pod, creating token and hash (in ReadDocs)")
+					logger.Debug("jdocs", esn, "Bot was not known to wire-pod, creating token and hash (in ReadDocs)")
 					guid, hash, _ := tokenserver.CreateTokenAndHashedToken()
 					tokenserver.SecondaryTokenStore = append(tokenserver.SecondaryTokenStore, [4]string{esn, ipAddr, guid, hash})
 					// creates apptoken jdoc file
@@ -147,7 +156,7 @@ func (s *JdocServer) ReadDocs(ctx context.Context, req *jdocspb.ReadDocsReq) (*j
 						},
 					}, nil
 				}
-				logger.Println("Bot not found in any store, providing global GUID")
+				logger.Debug("jdocs", esn, "Bot not found in any store, providing global GUID")
 				return &jdocspb.ReadDocsResp{
 					Items: []*jdocspb.ReadDocsResp_Item{
 						{

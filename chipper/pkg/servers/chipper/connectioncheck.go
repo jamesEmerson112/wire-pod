@@ -17,12 +17,12 @@ const (
 // StreamingConnectionCheck is used by the end device to make sure it can successfully communicate
 func (s *Server) StreamingConnectionCheck(stream pb.ChipperGrpc_StreamingConnectionCheckServer) error {
 	req, err := stream.Recv()
-	logger.Println("Incoming connection check from " + req.DeviceId)
+	logger.Debug("conn", req.DeviceId, "incoming connection check")
 	if err != nil {
-		logger.Println("Connection check unexpected error")
-		logger.Println(err)
+		logger.Error("conn", req.DeviceId, "conn check error: "+err.Error())
 		return err
 	}
+	deviceId := req.DeviceId
 
 	ctx, cancel := context.WithTimeout(stream.Context(), connectionCheckTimeout)
 	defer cancel()
@@ -38,7 +38,7 @@ receiveLoop:
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Println("Connection check expiration. Frames Received: " + strconv.Itoa(int(frames)))
+			logger.Debug("conn", deviceId, "expired, frames received "+strconv.Itoa(int(frames)))
 			toSend.Status = "Timeout"
 			break receiveLoop
 		default:
@@ -46,8 +46,7 @@ receiveLoop:
 
 			if suberr != nil || req == nil {
 				err = suberr
-				logger.Println("Connection check unexpected error. Frames Received: " + strconv.Itoa(int(frames)))
-				logger.Println(err)
+				logger.Error("conn", deviceId, "conn check error: "+err.Error())
 
 				toSend.Status = "Error"
 				break receiveLoop
@@ -56,7 +55,7 @@ receiveLoop:
 			frames++
 			toSend.FramesReceived = frames
 			if frames >= framesPerRequest {
-				logger.Println("Connection check success")
+				logger.Debug("conn", deviceId, "success")
 				toSend.Status = "Success"
 				break receiveLoop
 			}
@@ -64,8 +63,7 @@ receiveLoop:
 	}
 	senderr := stream.Send(&toSend)
 	if senderr != nil {
-		logger.Println("Failed to send connection check response to client")
-		logger.Println(err)
+		logger.Error("conn", deviceId, "failed to send response")
 		return senderr
 	}
 	return err
