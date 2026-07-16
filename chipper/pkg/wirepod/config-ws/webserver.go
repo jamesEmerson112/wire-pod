@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/kercre123/wire-pod/chipper/pkg/logger"
@@ -17,6 +18,7 @@ import (
 	"github.com/kercre123/wire-pod/chipper/pkg/vars"
 	"github.com/kercre123/wire-pod/chipper/pkg/wirepod/localization"
 	processreqs "github.com/kercre123/wire-pod/chipper/pkg/wirepod/preqs"
+	"github.com/kercre123/wire-pod/chipper/pkg/wirepod/sdkapp"
 	botsetup "github.com/kercre123/wire-pod/chipper/pkg/wirepod/setup"
 )
 
@@ -55,6 +57,10 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 		handleGetLogs(w)
 	case "get_debug_logs":
 		handleGetDebugLogs(w)
+	case "get_logs_json":
+		handleGetLogsJSON(w, r)
+	case "get_bot_status":
+		handleGetBotStatus(w)
 	case "is_running":
 		handleIsRunning(w)
 	case "delete_chats":
@@ -278,6 +284,28 @@ func handleGetLogs(w http.ResponseWriter) {
 func handleGetDebugLogs(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write([]byte(logger.LogTrayList))
+}
+
+func handleGetLogsJSON(w http.ResponseWriter, r *http.Request) {
+	var lvl logger.Level
+	switch r.URL.Query().Get("level") {
+	case "info":
+		lvl = logger.INFO
+	case "warn":
+		lvl = logger.WARN
+	case "error":
+		lvl = logger.ERROR
+	default:
+		lvl = logger.DEBUG
+	}
+	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(logger.GetEntries(lvl, since))
+}
+
+func handleGetBotStatus(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sdkapp.GetConnectionStatus())
 }
 
 func handleIsRunning(w http.ResponseWriter) {
