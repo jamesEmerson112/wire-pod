@@ -29,6 +29,42 @@ type JdocsPingerRobot struct {
 	Stopped            bool   `json:"stopped"`
 }
 
+type BotStatus struct {
+	Esn       string `json:"esn"`
+	IP        string `json:"ip"`
+	Status    string `json:"status"`
+	TimeSince int    `json:"timesince"`
+}
+
+func GetConnectionStatus() []BotStatus {
+	JdocsPingerBots.mu.Lock()
+	defer JdocsPingerBots.mu.Unlock()
+	var statuses []BotStatus
+	for _, robot := range vars.BotInfo.Robots {
+		status := BotStatus{
+			Esn:       robot.Esn,
+			IP:        robot.IPAddress,
+			Status:    "disconnected",
+			TimeSince: -1,
+		}
+		for _, bot := range JdocsPingerBots.Robots {
+			if bot.ESN == robot.Esn {
+				status.TimeSince = bot.TimeSinceLastCheck
+				if !bot.Stopped && bot.TimeSinceLastCheck <= 15 {
+					status.Status = "online"
+				} else if bot.Stopped && bot.TimeSinceLastCheck < 120 {
+					status.Status = "offline"
+				} else {
+					status.Status = "disconnected"
+				}
+				break
+			}
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses
+}
+
 // the escape pod CA cert only gets appended to the cert store when a jdocs connection is created
 // this doesn't happen at every boot
 // this utilizes Vector's connCheck to see if a bot has disconnected from the server for more than 10 seconds
@@ -49,25 +85,24 @@ func pingJdocs(target string) {
 		}
 	}
 	if !matched {
-		logger.Println("jdocs pinger error: serial did not match any bot in bot json")
+		logger.Error("sdkapp", "", "jdocs pinger: serial not in bot json")
 		return
 	}
 	robotTmp, err := NewWP(serial, false)
 	if err != nil {
-		logger.Println(err)
+		logger.Error("sdkapp", serial, "error pinging jdocs: "+err.Error())
 		return
 	}
 	_, err = robotTmp.Conn.BatteryState(ctx, &vectorpb.BatteryStateRequest{})
 	if err != nil {
 		robotTmp, err = NewWP(serial, true)
 		if err != nil {
-			logger.Println(err)
-			logger.Println("Error pinging jdocs")
+			logger.Error("sdkapp", serial, "error pinging jdocs: "+err.Error())
 			return
 		}
 		_, err = robotTmp.Conn.BatteryState(ctx, &vectorpb.BatteryStateRequest{})
 		if err != nil {
-			logger.Println("Error pinging jdocs, likely unauthenticated")
+			logger.Error("sdkapp", serial, "ping failed, likely unauthenticated")
 			return
 		}
 	}
@@ -75,10 +110,10 @@ func pingJdocs(target string) {
 		JdocTypes: []vectorpb.JdocType{vectorpb.JdocType_ROBOT_SETTINGS},
 	})
 	if err != nil {
-		logger.Println("Failed to pull jdocs: ", err)
+		logger.Error("sdkapp", serial, "pull jdocs: "+err.Error())
 		return
 	}
-	logger.Println("Successfully got jdocs from " + serial)
+	logger.Info("sdkapp", serial, "pulled jdocs")
 	// write to file
 	var jdoc vars.AJdoc
 	jdoc.DocVersion = resp.NamedJdocs[0].Doc.DocVersion
@@ -90,7 +125,7 @@ func pingJdocs(target string) {
 
 func InitJdocsPinger() {
 	if os.Getenv("JDOCS_PINGER_ENABLED") == "false" {
-		logger.Println("Jdocs pinger is disabled (JDOCS_PINGER_ENABLED=false)")
+		logger.Debug("sdkapp", "", "jdocs pinger disabled (JDOCS_PINGER_ENABLED=false)")
 		PingerEnabled = false
 		return
 	}
@@ -99,12 +134,10 @@ func InitJdocsPinger() {
 		for {
 			JdocsPingerBots.mu.Lock()
 			for i, bot := range JdocsPingerBots.Robots {
-				if !bot.Stopped {
-					JdocsPingerBots.Robots[i].TimeSinceLastCheck = JdocsPingerBots.Robots[i].TimeSinceLastCheck + 1
-					if JdocsPingerBots.Robots[i].TimeSinceLastCheck > 15 {
-						logger.Println("Haven't received a conn check from " + bot.ESN + " in 15 seconds, will ping jdocs on next check")
-						JdocsPingerBots.Robots[i].Stopped = true
-					}
+				JdocsPingerBots.Robots[i].TimeSinceLastCheck = JdocsPingerBots.Robots[i].TimeSinceLastCheck + 1
+				if JdocsPingerBots.Robots[i].TimeSinceLastCheck > 15 && !bot.Stopped {
+					logger.Debug("sdkapp", bot.ESN, "no conn check in 15s, will ping jdocs on next check")
+					JdocsPingerBots.Robots[i].Stopped = true
 				}
 			}
 			JdocsPingerBots.mu.Unlock()

@@ -53,7 +53,7 @@ func newRobot(serial string) (Robot, int, error) {
 			} else {
 				RobotObj.GUID = robot.GUID
 			}
-			logger.Println("Connecting to " + serial + " with GUID " + RobotObj.GUID)
+			logger.Info("sdkapp", serial, "connecting, GUID "+RobotObj.GUID)
 		}
 	}
 	if !matched {
@@ -140,7 +140,7 @@ func connTimer(ind int) {
 		// check if timer needs to be stopped
 		for _, num := range timerStopIndexes {
 			if num == ind {
-				logger.Println("Conn timer for robot index " + strconv.Itoa(ind) + " stopping")
+				logger.Debug("sdkapp", robots[ind].ESN, "conn timer stopping, index "+strconv.Itoa(ind))
 				var newIndexes []int
 				for _, num := range timerStopIndexes {
 					if num != ind {
@@ -152,7 +152,7 @@ func connTimer(ind int) {
 			}
 		}
 		if robots[ind].ConnTimer >= 300 {
-			logger.Println("Closing SDK connection for " + robots[ind].ESN + ", source: connTimer")
+			logger.Debug("sdkapp", robots[ind].ESN, "closing SDK connection, source: connTimer")
 			removeRobot(robots[ind].ESN, "connTimer")
 			return
 		}  
@@ -196,7 +196,7 @@ func NewWP(serial string, useGlobal bool) (*vector.Vector, error) {
 		}
 	}
 	if !matched {
-		logger.Println("serial did not match any bot in bot json")
+		logger.Error("sdkapp", serial, "serial did not match any bot in bot json")
 		return nil, errors.New("serial did not match any bot in bot json")
 	}
 	c, err := client.New(
