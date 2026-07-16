@@ -238,6 +238,7 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 	var fullfullRespText string
 	var fullRespSlice []string
 	var isDone bool
+	var lastFinishReason string
 	var c *openai.Client
 	switch vars.APIConfig.Knowledge.Provider {
 	case "together":
@@ -294,9 +295,20 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 		for {
 			response, err := stream.Recv()
 			if errors.Is(err, io.EOF) {
+				if len(fullRespSlice) == 0 && strings.TrimSpace(fullRespText) != "" {
+					// the whole answer had no sentence punctuation (e.g. a
+					// one-word response); speak it as-is instead of dropping it
+					logger.Info("llm", esn, "response has no sentence punctuation, using it as-is")
+					fullRespSlice = append(fullRespSlice, strings.TrimSpace(fullRespText))
+					successIntent <- true
+				}
 				// prevents a crash
 				if len(fullRespSlice) == 0 {
-					logger.Debug("llm", esn, "LLM returned no response")
+					finishReason := lastFinishReason
+					if finishReason == "" {
+						finishReason = "unknown"
+					}
+					logger.Warn("llm", esn, "LLM stream ended with no usable response (finish reason: "+finishReason+")")
 					successIntent <- false
 					if isKG {
 						kgStopLooping = true
@@ -341,14 +353,27 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 
 			if err != nil {
 				logger.Error("llm", esn, "stream error: "+err.Error())
+				// unblock the caller and the speaking loop instead of hanging them
+				isDone = true
+				select {
+				case successIntent <- false:
+				default:
+				}
+				select {
+				case speakReady <- "":
+				default:
+				}
 				return
 			}
 
 			if len(response.Choices) == 0 {
-				logger.Debug("llm", esn, "empty response")
-				return
+				logger.Debug("llm", esn, "empty response chunk")
+				continue
 			}
 
+			if response.Choices[0].FinishReason != "" {
+				lastFinishReason = string(response.Choices[0].FinishReason)
+			}
 			fullfullRespText = fullfullRespText + removeSpecialCharacters(response.Choices[0].Delta.Content)
 			fullRespText = fullRespText + removeSpecialCharacters(response.Choices[0].Delta.Content)
 			if strings.Contains(fullRespText, "...") || strings.Contains(fullRespText, ".'") || strings.Contains(fullRespText, ".\"") || strings.Contains(fullRespText, ".") || strings.Contains(fullRespText, "?") || strings.Contains(fullRespText, "!") {
@@ -457,6 +482,11 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 					for range speakReady {
 						respSlice = fullRespSlice
 						break
+					}
+					// the wake-up may carry no new sentence (stream error);
+					// re-check before indexing
+					if len(respSlice)-1 < numInResp {
+						continue
 					}
 				} else {
 					break
