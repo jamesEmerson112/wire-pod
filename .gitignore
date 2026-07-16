@@ -48,3 +48,4 @@
 # local scratch: downloaded wpsetup site JS (investigation) and bot log dumps
 /vws
 vector-logs-*.tar.bz2
+log_example.txt
