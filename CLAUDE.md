@@ -97,3 +97,13 @@ Known upstream bugs, NOT yet fixed in this fork (verify still present before PRi
   (`servers/jdocs/server.go` ~:76).
 - `GET /api/get_kg_api` returns the LLM API key in plaintext to any LAN client
   (`config-ws/webserver.go`) — needs an upstream design conversation, not a drive-by fix.
+
+## Context History
+
+### 2026-07-16 14:07
+- Merged `feature/log-redesign` into main (log system redesign + 3-state bot status UI), deployed on the robot as v1.2.18-custom. Added "Upstream PR candidates" section to this file.
+- [feat] New branch `feature/battery-gohome` (current): battery go-home watchdog. Added `chipper/pkg/wirepod/sdkapp/batterywatchdog.go` — polls each online bot's battery every 30s (BatteryState RPC via cached `vars.GetRobot` connections), ports the `battery.js` volts→percent curve; when percent <= `APIConfig.Battery.GoHomePercent` (new config, default 25, 0=disabled, env seed `GOHOME_BATTERY_PERCENT`) for 3 consecutive polls while off-charger, assumes behavior control (`OVERRIDE_BEHAVIORS`) and fires `DriveOnCharger` (silent, no voice line); 10-min cooldown per firing, 3 attempts max then 30-min backoff. Hooked via `go BatteryWatchdog()` in `sdkapp.BeginServer` (works in packaged WirePod wrapper builds too).
+  - Why: robot's degraded battery sags too fast for the firmware's own self-dock threshold.
+- [research] Added unconditional debug log of the final LLM system prompt in `ttr/kgsim_cmds.go` `CreatePrompt` (comp "llm") to diagnose why the custom GPT Prompt ("One word response only") seems ignored. Finding: prompt wiring is correct, but when LLM commands are enabled ~1500 chars of animation instructions get appended after the custom prompt and can bury short directives.
+- Commits: `9b7da13` (watchdog), `b9fb109` (prompt logging).
+- [todo] Elevated `scripts/build-windows.ps1 -Deploy` build+deploy to the installed Windows app was launched; verification pending at time of logging.
