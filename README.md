@@ -25,4 +25,5 @@ If you want to :P
 - [dietb](https://github.com/dietb) for rewriting chipper and giving tips
 - [fforchino](https://github.com/fforchino) for adding many features such as localization and multilanguage, and for helping out
 - [xanathon](https://github.com/xanathon) for the publicity and web interface help
+- [jamesEmerson112](https://github.com/jamesEmerson112) for this fork's enhancements: structured log system with levels/filtering, live bot connection status UI, battery go-home watchdog, LLM streaming fixes, and Windows build/deploy tooling
 - Anyone who has opened an issue and/or created a pull request for wire-pod
