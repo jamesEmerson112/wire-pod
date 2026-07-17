@@ -37,6 +37,8 @@ type apiConfig struct {
 		Endpoint               string  `json:"endpoint"`
 		TopP                   float32 `json:"top_p"`
 		Temperature            float32 `json:"temp"`
+		// for gpt-5*/o* reasoning models: none|low|medium|high|xhigh ("" = medium)
+		ReasoningEffort string `json:"reasoning_effort"`
 	} `json:"knowledge"`
 	STT struct {
 		Service  string `json:"provider"`

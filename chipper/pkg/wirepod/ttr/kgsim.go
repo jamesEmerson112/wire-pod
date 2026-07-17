@@ -134,6 +134,42 @@ func removeEmojis(input string) string {
 	return result
 }
 
+// default model for the openai provider: cheapest current-gen reasoning tier
+const defaultOpenAIModel = "gpt-5.6-luna"
+
+// gpt-5* and o-series models reject max_tokens and sampling params like
+// temperature; they take max_completion_tokens and a reasoning effort instead
+func isReasoningModel(model string) bool {
+	for _, prefix := range []string{"gpt-5", "o1", "o3", "o4"} {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// sets the token/sampling/reasoning params on a request to match its Model;
+// clears both param groups first so it is safe to re-apply after a model swap
+func setAIReqParams(aireq *openai.ChatCompletionRequest) {
+	aireq.MaxTokens = 0
+	aireq.MaxCompletionTokens = 0
+	aireq.Temperature = 0
+	aireq.TopP = 0
+	aireq.ReasoningEffort = ""
+	if isReasoningModel(aireq.Model) {
+		aireq.MaxCompletionTokens = 2048
+		effort := strings.TrimSpace(vars.APIConfig.Knowledge.ReasoningEffort)
+		if effort == "" {
+			effort = "medium"
+		}
+		aireq.ReasoningEffort = effort
+	} else {
+		aireq.MaxTokens = 2048
+		aireq.Temperature = 1
+		aireq.TopP = 1
+	}
+}
+
 func CreateAIReq(transcribedText, esn string, gpt3tryagain, isKG bool) openai.ChatCompletionRequest {
 	defaultPrompt := "You are a helpful, animated robot called Vector. Keep the response concise yet informative."
 
@@ -151,9 +187,12 @@ func CreateAIReq(transcribedText, esn string, gpt3tryagain, isKG bool) openai.Ch
 	var model string
 
 	if gpt3tryagain {
-		model = openai.GPT3Dot5Turbo
-	} else if vars.APIConfig.Knowledge.Provider == "openai" {
 		model = openai.GPT4oMini
+	} else if vars.APIConfig.Knowledge.Provider == "openai" {
+		model = strings.TrimSpace(vars.APIConfig.Knowledge.Model)
+		if model == "" {
+			model = defaultOpenAIModel
+		}
 		logger.Debug("llm", esn, "using "+model)
 	} else {
 		logger.Debug("llm", esn, "using "+vars.APIConfig.Knowledge.Model)
@@ -174,15 +213,11 @@ func CreateAIReq(transcribedText, esn string, gpt3tryagain, isKG bool) openai.Ch
 	})
 
 	aireq := openai.ChatCompletionRequest{
-		Model:            model,
-		MaxTokens:        2048,
-		Temperature:      1,
-		TopP:             1,
-		FrequencyPenalty: 0,
-		PresencePenalty:  0,
-		Messages:         nChat,
-		Stream:           true,
+		Model:    model,
+		Messages: nChat,
+		Stream:   true,
 	}
+	setAIReqParams(&aireq)
 	return aireq
 }
 
@@ -265,7 +300,7 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 	if err != nil {
 		log.Printf("Error creating chat completion stream: %v", err)
 		if strings.Contains(err.Error(), "does not exist") && vars.APIConfig.Knowledge.Provider == "openai" {
-			logger.Warn("llm", esn, "GPT-4 not accessible with this key; add credit to the OpenAI account")
+			logger.Warn("llm", esn, aireq.Model+" not accessible with this key; check the OpenAI account")
 			aireq := CreateAIReq(transcribedText, esn, true, isKG)
 			logger.Warn("llm", esn, "falling back to "+aireq.Model)
 			stream, err = c.CreateChatCompletionStream(ctx, aireq)
@@ -285,6 +320,12 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 			}
 			return "", err
 		}
+	}
+	if !isKG {
+		// answer the robot's intent request immediately so its firmware
+		// doesn't time out while a reasoning model thinks; the actual
+		// speech happens through the SDK once sentences arrive
+		IntentPass(req, "intent_greeting_hello", transcribedText, map[string]string{}, false)
 	}
 	nChat := aireq.Messages
 	nChat = append(nChat, openai.ChatCompletionMessage{
@@ -407,9 +448,6 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 	}()
 	for is := range successIntent {
 		if is {
-			if !isKG {
-				IntentPass(req, "intent_greeting_hello", transcribedText, map[string]string{}, false)
-			}
 			break
 		} else {
 			return "", errors.New("llm returned no response")

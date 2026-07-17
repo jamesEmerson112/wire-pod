@@ -152,6 +152,11 @@ func ModelIsSupported(cmd LLMCommand, model string) bool {
 func CreatePrompt(origPrompt string, model string, isKG bool) string {
 	// the user-configured prompt goes LAST so it outweighs the built-in
 	// instructions (models weight later instructions more heavily)
+
+	// Initial detailed instruction will require a Reasoning model to manage.
+	// Prompt also follows Anthropic guide line instead of OpenAI
+	// TODO: add a budget mode with one sentence prompt and a "Smart" mode with reasoning model to manage the detailed prompt
+
 	prompt := "Keep in mind, user input comes from speech-to-text software, so respond accordingly. " +
 		"No special characters, especially these: & ^ * # @ - . No lists. No formatting."
 	if vars.APIConfig.Knowledge.CommandsEnable {
@@ -506,30 +511,30 @@ func DoGetImage(msgs []openai.ChatCompletionMessage, param string, robot *vector
 	speakReady := make(chan string)
 
 	aireq := openai.ChatCompletionRequest{
-		MaxTokens:        2048,
-		Temperature:      1,
-		TopP:             1,
-		FrequencyPenalty: 0,
-		PresencePenalty:  0,
-		Messages:         msgs,
-		Stream:           true,
+		Messages: msgs,
+		Stream:   true,
 	}
 	if vars.APIConfig.Knowledge.Provider == "openai" {
-		aireq.Model = openai.GPT4oMini
+		aireq.Model = strings.TrimSpace(vars.APIConfig.Knowledge.Model)
+		if aireq.Model == "" {
+			aireq.Model = defaultOpenAIModel
+		}
 		logger.Debug("llm", robot.Cfg.SerialNo, "using "+aireq.Model)
 	} else {
 		logger.Debug("llm", robot.Cfg.SerialNo, "using "+vars.APIConfig.Knowledge.Model)
 		aireq.Model = vars.APIConfig.Knowledge.Model
 	}
+	setAIReqParams(&aireq)
 	if stopImaging {
 		return
 	}
 	stream, err := c.CreateChatCompletionStream(ctx, aireq)
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") && vars.APIConfig.Knowledge.Provider == "openai" {
-			logger.Warn("llm", robot.Cfg.SerialNo, "GPT-4 not accessible with this key; add credit to the OpenAI account")
-			aireq.Model = openai.GPT3Dot5Turbo
+			logger.Warn("llm", robot.Cfg.SerialNo, aireq.Model+" not accessible with this key; check the OpenAI account")
+			aireq.Model = openai.GPT4oMini
 			logger.Warn("llm", robot.Cfg.SerialNo, "falling back to "+aireq.Model)
+			setAIReqParams(&aireq)
 			stream, err = c.CreateChatCompletionStream(ctx, aireq)
 			if err != nil {
 				logger.Error("llm", robot.Cfg.SerialNo, "openai still not returning a response after falling back")
