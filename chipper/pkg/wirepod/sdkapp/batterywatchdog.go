@@ -35,6 +35,9 @@ type bwBotState struct {
 	// transition on the first poll after startup
 	haveReading bool
 	lastHome    bool
+	// set when a low-battery go-home reached the charger, so the next
+	// dock transition log can state the cause
+	sentHome bool
 }
 
 type bwCachedConn struct {
@@ -177,7 +180,11 @@ func bwPollBot(esn string) {
 	bwMu.Lock()
 	if state.haveReading && home != state.lastHome {
 		if home {
-			logger.Info("sdkapp", esn, fmt.Sprintf("robot is back on the charger (%d%%, %.2fV)", percent, volts))
+			if state.sentHome {
+				logger.Info("sdkapp", esn, fmt.Sprintf("robot came back home to charge because battery hit the go-home threshold (%d%%, %.2fV)", percent, volts))
+			} else {
+				logger.Info("sdkapp", esn, fmt.Sprintf("robot is back on the charger (%d%%, %.2fV)", percent, volts))
+			}
 		} else {
 			logger.Info("sdkapp", esn, fmt.Sprintf("robot left the charger (%d%%, %.2fV)", percent, volts))
 		}
@@ -188,6 +195,7 @@ func bwPollBot(esn string) {
 		state.consecutiveLow = 0
 		state.attempts = 0
 		state.coolingUntil = time.Time{}
+		state.sentHome = false
 		bwMu.Unlock()
 		return
 	}
@@ -222,6 +230,7 @@ func bwPollBot(esn string) {
 
 	bwMu.Lock()
 	state.docking = false
+	state.sentHome = reached
 	state.coolingUntil = time.Now().Add(bwCooldown)
 	if reached {
 		state.attempts = 0
