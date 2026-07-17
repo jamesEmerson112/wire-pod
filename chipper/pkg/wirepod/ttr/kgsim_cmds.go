@@ -150,26 +150,51 @@ func ModelIsSupported(cmd LLMCommand, model string) bool {
 }
 
 func CreatePrompt(origPrompt string, model string, isKG bool) string {
-	prompt := origPrompt + "\n\n" + "Keep in mind, user input comes from speech-to-text software, so respond accordingly. No special characters, especially these: & ^ * # @ - . No lists. No formatting."
+	// the user-configured prompt goes LAST so it outweighs the built-in
+	// instructions (models weight later instructions more heavily)
+
+	// Initial detailed instruction will require a Reasoning model to manage.
+	// Prompt also follows Anthropic guide line instead of OpenAI
+	// TODO: add a budget mode with one sentence prompt and a "Smart" mode with reasoning model to manage the detailed prompt
+
+	prompt := "Keep in mind, user input comes from speech-to-text software, so respond accordingly. " +
+		"No special characters, especially these: & ^ * # @ - . No lists. No formatting."
 	if vars.APIConfig.Knowledge.CommandsEnable {
-		prompt = prompt + "\n\n" + "You are running ON an Anki Vector robot. You have a set of commands. If you include an emoji, I will make you start over. If you want to use a command but it doesn't exist or your desired parameter isn't in the list, avoid using the command. The format is {{command||parameter}}. You can embed these in sentences. Example: \"User: How are you feeling? | Response: \"{{playAnimationWI||sad}} I'm feeling sad...\". Square brackets ([]) are not valid.\n\nUse the playAnimation or playAnimationWI commands if you want to express emotion! You are very animated and good at following instructions. Animation takes precendence over words. You are to include many animations in your response.\n\nHere is every valid command:"
+		prompt = prompt + "\n\n" +
+			"You are running ON an Anki Vector robot. You have a set of commands. " +
+			"If you include an emoji, I will make you start over. " +
+			"If you want to use a command but it doesn't exist or your desired parameter isn't in the list, avoid using the command. " +
+			"The format is {{command||parameter}}. You can embed these in sentences. " +
+			"Example: \"User: How are you feeling? | Response: \"{{playAnimationWI||sad}} I'm feeling sad...\". " +
+			"Square brackets ([]) are not valid.\n\n" +
+			"Use the playAnimation or playAnimationWI commands if you want to express emotion! " +
+			"You are very animated and good at following instructions. " +
+			"Animation takes precendence over words. You are to include many animations in your response.\n\n" +
+			"Here is every valid command:"
 		for _, cmd := range ValidLLMCommands {
 			if ModelIsSupported(cmd, model) {
-				promptAppendage := "\n\nCommand Name: " + cmd.Command + "\nDescription: " + cmd.Description + "\nParameter choices: " + cmd.ParamChoices
+				promptAppendage := "\n\nCommand Name: " + cmd.Command +
+					"\nDescription: " + cmd.Description +
+					"\nParameter choices: " + cmd.ParamChoices
 				prompt = prompt + promptAppendage
 			}
 		}
 		if isKG && vars.APIConfig.Knowledge.SaveChat {
-			promptAppentage := "\n\nNOTE: You are in 'conversation' mode. If you ask the user a question near the end of your response, you MUST use newVoiceRequest. If you decide you want to end the conversation, you should not use it."
+			promptAppentage := "\n\nNOTE: You are in 'conversation' mode. " +
+				"If you ask the user a question near the end of your response, you MUST use newVoiceRequest. " +
+				"If you decide you want to end the conversation, you should not use it."
 			prompt = prompt + promptAppentage
 		} else {
-			promptAppentage := "\n\nNOTE: You are NOT in 'conversation' mode. Refrain from asking the user any questions and from using newVoiceRequest."
+			promptAppentage := "\n\nNOTE: You are NOT in 'conversation' mode. " +
+				"Refrain from asking the user any questions and from using newVoiceRequest."
 			prompt = prompt + promptAppentage
 		}
 	}
+	prompt = prompt + "\n\n" + origPrompt
 	if os.Getenv("DEBUG_PRINT_PROMPT") == "true" {
 		logger.Debug("llm", "", prompt)
 	}
+	logger.Debug("llm", "", "LLM system prompt: "+prompt)
 	return prompt
 }
 
@@ -486,30 +511,30 @@ func DoGetImage(msgs []openai.ChatCompletionMessage, param string, robot *vector
 	speakReady := make(chan string)
 
 	aireq := openai.ChatCompletionRequest{
-		MaxTokens:        2048,
-		Temperature:      1,
-		TopP:             1,
-		FrequencyPenalty: 0,
-		PresencePenalty:  0,
-		Messages:         msgs,
-		Stream:           true,
+		Messages: msgs,
+		Stream:   true,
 	}
 	if vars.APIConfig.Knowledge.Provider == "openai" {
-		aireq.Model = openai.GPT4oMini
+		aireq.Model = strings.TrimSpace(vars.APIConfig.Knowledge.Model)
+		if aireq.Model == "" {
+			aireq.Model = defaultOpenAIModel
+		}
 		logger.Debug("llm", robot.Cfg.SerialNo, "using "+aireq.Model)
 	} else {
 		logger.Debug("llm", robot.Cfg.SerialNo, "using "+vars.APIConfig.Knowledge.Model)
 		aireq.Model = vars.APIConfig.Knowledge.Model
 	}
+	setAIReqParams(&aireq)
 	if stopImaging {
 		return
 	}
 	stream, err := c.CreateChatCompletionStream(ctx, aireq)
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") && vars.APIConfig.Knowledge.Provider == "openai" {
-			logger.Warn("llm", robot.Cfg.SerialNo, "GPT-4 not accessible with this key; add credit to the OpenAI account")
-			aireq.Model = openai.GPT3Dot5Turbo
+			logger.Warn("llm", robot.Cfg.SerialNo, aireq.Model+" not accessible with this key; check the OpenAI account")
+			aireq.Model = openai.GPT4oMini
 			logger.Warn("llm", robot.Cfg.SerialNo, "falling back to "+aireq.Model)
+			setAIReqParams(&aireq)
 			stream, err = c.CreateChatCompletionStream(ctx, aireq)
 			if err != nil {
 				logger.Error("llm", robot.Cfg.SerialNo, "openai still not returning a response after falling back")
