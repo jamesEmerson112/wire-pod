@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/digital-dream-labs/hugh/grpc/client"
@@ -18,6 +19,98 @@ import (
 var robots []Robot
 var timerStopIndexes []int
 var inhibitCreation bool
+
+// camStreamHandler, the conn timer and the stop_cam_stream endpoint all touch the
+// camera feed from different goroutines. camMu guards exactly three things: the
+// CamStreaming flag, the camStreams registry below, and the two statements that
+// replace the robots slice itself, so a reader can never see a half-written slice
+// header. Every other field of Robot is as unsynchronised as it was before this;
+// nothing here should be read as protecting them.
+var camMu sync.Mutex
+
+// One entry per robot that has a live /cam-stream handler, keyed by ESN rather
+// than by a position in robots: removeRobot rebuilds that slice by filtering, so
+// an index captured when the stream opened names a different robot after any
+// earlier robot is dropped, and a camera-only page is dropped by connTimer after
+// 300s because nothing on it resets ConnTimer.
+type camStream struct {
+	// The generation handed to the owning handler. Cleanup that finds a different
+	// generation has been superseded and must leave the robot alone, or it turns
+	// the camera off underneath the handler that replaced it.
+	gen    uint64
+	cancel context.CancelFunc
+}
+
+var camStreams = map[string]*camStream{}
+var camGen uint64
+
+// call with camMu held
+func setCamStreamingLocked(esn string, streaming bool) {
+	for i := range robots {
+		if strings.EqualFold(esn, robots[i].ESN) {
+			robots[i].CamStreaming = streaming
+			return
+		}
+	}
+}
+
+func isCamStreaming(esn string) bool {
+	camMu.Lock()
+	defer camMu.Unlock()
+	for i := range robots {
+		if strings.EqualFold(esn, robots[i].ESN) {
+			return robots[i].CamStreaming
+		}
+	}
+	return false
+}
+
+// claimCamStream makes the caller the owner of this robot's camera feed. Whatever
+// handler held it is cancelled rather than left hanging, which is the "explicitly
+// stop the existing feed before starting another" half of the fix; the returned
+// bool says whether there was one, because the robot needs a moment to drop the
+// old CameraFeed before a new one is opened.
+func claimCamStream(esn string, cancel context.CancelFunc) (uint64, bool) {
+	camMu.Lock()
+	prev := camStreams[esn]
+	camGen++
+	gen := camGen
+	camStreams[esn] = &camStream{gen: gen, cancel: cancel}
+	setCamStreamingLocked(esn, true)
+	camMu.Unlock()
+	if prev != nil {
+		prev.cancel()
+		return gen, true
+	}
+	return gen, false
+}
+
+// releaseCamStream drops ownership if the caller still holds it, and reports
+// whether it did. Only the current owner may disable the robot's image streaming.
+func releaseCamStream(esn string, gen uint64) bool {
+	camMu.Lock()
+	defer camMu.Unlock()
+	cur := camStreams[esn]
+	if cur == nil || cur.gen != gen {
+		return false
+	}
+	delete(camStreams, esn)
+	setCamStreamingLocked(esn, false)
+	return true
+}
+
+// stopCamStream ends the feed for this robot if one is running. Clearing the flag
+// alone is not enough: the handler only samples it after Recv returns, which never
+// happens on a robot that is sending no frames, so cancel the stream context too.
+func stopCamStream(esn string) {
+	camMu.Lock()
+	setCamStreamingLocked(esn, false)
+	cur := camStreams[esn]
+	camMu.Unlock()
+	if cur != nil {
+		cur.cancel()
+	}
+}
 
 type Robot struct {
 	ESN               string
@@ -100,8 +193,12 @@ func newRobot(serial string) (Robot, int, error) {
 	RobotObj.EventsStreaming = false
 
 	// we have confirmed robot connection works, append to list of bots
+	// Under camMu so the readers of the slice header (isCamStreaming and friends)
+	// cannot observe it mid-write when append reallocates.
+	camMu.Lock()
 	robots = append(robots, RobotObj)
 	robotIndex := len(robots) - 1
+	camMu.Unlock()
 
 	// begin inactivity timer
 	go connTimer(robotIndex)
@@ -170,14 +267,18 @@ func removeRobot(serial, source string) {
 			if source == "server" {
 				timerStopIndexes = append(timerStopIndexes, ind)
 			}
-			robots[ind].CamStreaming = false
+			// Cancels the feed as well as clearing the flag: a handler parked in
+			// Recv on a robot that sends no frames cannot see the flag at all.
+			stopCamStream(robots[ind].ESN)
 			robots[ind].EventsStreaming = false
 			robots[ind].BcAssumption = false
 			// give time for all of that to stop
 			time.Sleep(time.Second * 3)
 		}
 	}
+	camMu.Lock()
 	robots = newRobots
+	camMu.Unlock()
 	inhibitCreation = false
 }
 

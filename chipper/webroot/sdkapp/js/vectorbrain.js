@@ -27,6 +27,10 @@
   // separate deadline for that case camFrames stays 0, the camFrames >= 2 guard in
   // camStalled never trips, and the panel sits black with no explanation.
   var CAM_FIRST_FRAME_MS = 8000;
+  // Consecutive failed attempts before the camera stops dialling on its own. Each
+  // attempt costs a request and a gRPC stream server-side, and a docked robot will
+  // not wake by itself, so retrying forever is pure waste.
+  var CAM_MAX_RETRIES = 3;
   var STATUS_FAIL_LIMIT = 3;
   // Matches the default of APIConfig.Battery.GoHomePercent (batterywatchdog.go), so
   // the readout turns red before the watchdog sends the robot home, not after.
@@ -208,6 +212,14 @@
     if (!KNOWN_STATUS[status]) {
       status = "unknown";
     }
+    if (status === "online" && status !== lastStatus) {
+      // A robot that has just come back is a fresh chance for the camera, so let
+      // maybeRetryCam dial again rather than staying held from the old state. Only
+      // this transition: resetting on every change would also reset on the way out
+      // and on the "unknown" that a failing status poll renders, so a flapping
+      // robot or a flaky server would re-arm the budget forever.
+      camFailures = 0;
+    }
     lastStatus = status;
 
     var textEl = el("vbStatusText");
@@ -346,11 +358,26 @@
   var camFrames = 0;
   var camLastFrame = 0;
   var camFailures = 0;
+  // Whether the current attempt has already been counted, so the two places that
+  // notice a failure cannot count the same one twice.
+  var camCounted = false;
 
   function setCamOff(off) {
     var frame = el("vbCamFrame");
     if (frame) {
       frame.classList.toggle("vb-cam-off", !!off);
+      // The overlay advertises CLICK TO RETRY, and the frame is a plain div: not
+      // focusable, not operable by keyboard. Give it the affordance while it is
+      // offering one and take it away again with the offer.
+      if (off) {
+        frame.setAttribute("tabindex", "0");
+        frame.setAttribute("role", "button");
+        frame.setAttribute("aria-label", "Camera offline, click to retry");
+      } else {
+        frame.removeAttribute("tabindex");
+        frame.removeAttribute("role");
+        frame.removeAttribute("aria-label");
+      }
     }
   }
 
@@ -365,6 +392,7 @@
     camStarted = true;
     camStopping = false;
     camErrored = false;
+    camCounted = false;
     camFrames = 0;
     camLastFrame = Date.now();
     camLastTry = camLastFrame;
@@ -419,18 +447,41 @@
     );
   }
 
+  // One failure per attempt, wherever it is noticed. The stall detectors and the
+  // img "error" listener both come through here: counting only in the detectors
+  // left camFailures at zero for every HTTP-level failure, because the Go handler
+  // reports those as a plaintext 200 body that the <img> rejects with an "error"
+  // event long before the first-frame deadline. The ceiling and the backoff below
+  // then never engaged on that path at all.
+  function markCamFailure() {
+    if (!camCounted) {
+      camCounted = true;
+      camFailures++;
+    }
+    camErrored = true;
+    setCamOff(true);
+  }
+
   function maybeRetryCam() {
-    if (document.hidden || lastStatus !== "online") {
+    if (document.hidden) {
       return;
     }
+    // Notice the failure whatever the robot's status is: a stream that hangs while
+    // the robot is away otherwise leaves the panel showing a black frame with the
+    // crosshair and caption of a working one, and never restores the overlay.
     if (camStalled() || camNeverArrived()) {
-      if (!camErrored) {
-        camFailures++;
-      }
-      camErrored = true;
-      setCamOff(true);
+      markCamFailure();
     }
     if (!camErrored) {
+      return;
+    }
+    // Dial only when there is something to dial.
+    if (lastStatus !== "online") {
+      return;
+    }
+    // Hold instead of dialling forever. Cleared by the robot coming online, by the
+    // tab becoming visible again, or by clicking the frame.
+    if (camFailures >= CAM_MAX_RETRIES) {
       return;
     }
     // Back off as failures repeat. Every attempt against a robot whose camera will
@@ -442,17 +493,40 @@
     startCam();
   }
 
+  function retryCamNow() {
+    if (!camErrored) {
+      return;
+    }
+    // The overlay asks to be clicked, so it will be double-clicked; a second
+    // request inside the server's half-second handshake is pure waste.
+    if (Date.now() - camLastTry < 1000) {
+      return;
+    }
+    // Explicit user intent outranks the retry ceiling.
+    camFailures = 0;
+    startCam();
+  }
+
   function initCam() {
     var img = el("vbCam");
     if (!img) {
       return;
     }
+    var frame = el("vbCamFrame");
+    if (frame) {
+      frame.addEventListener("click", retryCamNow);
+      frame.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter" || ev.key === " " || ev.keyCode === 13 || ev.keyCode === 32) {
+          ev.preventDefault();
+          retryCamNow();
+        }
+      });
+    }
     img.addEventListener("error", function () {
       if (camStopping) {
         return;
       }
-      camErrored = true;
-      setCamOff(true);
+      markCamFailure();
     });
     img.addEventListener("load", function () {
       // stopCam assigns a blank GIF to abort the stream; that load is not a frame.
@@ -463,6 +537,7 @@
       camLastFrame = Date.now();
       camErrored = false;
       camFailures = 0;
+      camCounted = false;
       setCamOff(false);
     });
     startCam();
@@ -692,6 +767,26 @@
     if (document.body && document.body.classList) {
       document.body.classList.toggle("vb-locked", open);
     }
+    if (!open) {
+      // showSection('section-stim') sets the global stimRunning, POSTs
+      // begin_event_stream and starts a 500ms poller in main.js. That teardown is
+      // cooperative: the poller stops itself and POSTs stop_event_stream once it
+      // observes the flag go false. Until the drawer existed, the only way out of
+      // the section was clicking another tile, which took showSection's else
+      // branch. Closing the drawer is a new exit and has to do the same, or the
+      // poller and the robot's event stream keep running behind a hidden drawer.
+      if (window.stimRunning) {
+        window.stimRunning = false;
+      }
+      // And put the sections back the way the drawer starts. Leaving one displayed
+      // means reopening presents a Stim panel frozen on its last twelve datapoints
+      // with its poller and the robot's event stream stopped and nothing saying so,
+      // and re-selecting the tile that is already showing looks like a no-op.
+      var sections = document.getElementsByClassName("toggleable-section");
+      for (var i = 0; i < sections.length; i++) {
+        sections[i].style.display = "none";
+      }
+    }
     drawerOpen = open;
   }
 
@@ -761,6 +856,7 @@
         stopCam();
         return;
       }
+      camFailures = 0;
       startCam();
       statusPoller.kick();
       batteryPoller.kick();

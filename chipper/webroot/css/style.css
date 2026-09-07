@@ -1225,7 +1225,7 @@ body:has(.vb-wrap) {
 }
 
 #vbCamFrame.vb-cam-off::after {
-  content: "CAMERA OFFLINE";
+  content: "CAMERA OFFLINE - CLICK TO RETRY";
   position: absolute;
   left: 50%;
   top: 50%;
@@ -1235,6 +1235,10 @@ body:has(.vb-wrap) {
   letter-spacing: 0.12em;
   color: var(--vb-muted);
   pointer-events: none;
+}
+
+#vbCamFrame.vb-cam-off {
+  cursor: pointer;
 }
 
 /* The crosshair and the resolution caption belong to a live frame; over an

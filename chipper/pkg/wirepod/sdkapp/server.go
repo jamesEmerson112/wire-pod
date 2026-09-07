@@ -379,6 +379,14 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	case r.URL.Path == "/api-sdk/begin_event_stream":
 		// setup websocket
+		if robots[robotIndex].EventsStreaming {
+			// Already running. Without this, re-selecting Stim - which the drawer
+			// makes easy, and which the tiles' inline onclick allows twice in a row -
+			// spawns a second EventStream goroutine against the robot that the first
+			// one's stop can no longer reach.
+			fmt.Fprint(w, "done")
+			return
+		}
 		robots[robotIndex].EventsStreaming = true
 		go func() {
 			client, err := robot.Conn.EventStream(
@@ -392,14 +400,19 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 					ConnectionId: "wirepod",
 				},
 			)
+			// w belongs to a request that returns below, long before this goroutine
+			// is done, so nothing here may write to it. On error client is nil and
+			// the loop's Recv would panic, hence the return that was missing.
 			if err != nil {
-				fmt.Fprint(w, err.Error())
+				logger.Println("event stream: " + err.Error())
+				robots[robotIndex].EventsStreaming = false
+				return
 			}
 			for {
 				if robots[robotIndex].EventsStreaming {
 					resp, err := client.Recv()
 					if err != nil {
-						fmt.Fprint(w, err.Error())
+						logger.Println("event stream: " + err.Error())
 						robots[robotIndex].EventsStreaming = false
 						return
 					}
@@ -433,7 +446,7 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "done")
 		return
 	case r.URL.Path == "/api-sdk/stop_cam_stream":
-		robots[robotIndex].CamStreaming = false
+		stopCamStream(robotObj.ESN)
 		fmt.Fprint(w, "done")
 		return
 	case r.URL.Path == "/api-sdk/get_image_ids":
@@ -545,25 +558,61 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// enableImageStreaming is the robot-side on/off switch for the camera. It runs on
+// robotObj.Ctx rather than the stream context because cleanup happens after that
+// has been cancelled, and on a deadline because robotObj.Ctx is context.Background
+// and the SDK sets no per-call timeout: without one, a robot that has stopped
+// answering RPCs parks this goroutine in the very call meant to free it.
+func enableImageStreaming(robotObj Robot, enable bool) {
+	ctx, cancel := context.WithTimeout(robotObj.Ctx, time.Second*5)
+	defer cancel()
+	robotObj.Vector.Conn.EnableImageStreaming(
+		ctx,
+		&vectorpb.EnableImageStreamingRequest{
+			Enable: enable,
+		},
+	)
+}
+
 func camStreamHandler(w http.ResponseWriter, r *http.Request) {
-	robotObj, robotIndex, err := getRobot(r.FormValue("serial"))
+	robotObj, _, err := getRobot(r.FormValue("serial"))
 	if err != nil {
 		fmt.Fprint(w, "error: "+err.Error())
 		return
 	}
-	if robots[robotIndex].CamStreaming {
-		robots[robotIndex].CamStreaming = false
+	esn := robotObj.ESN
+	// The feed has to hang off a context this handler can cancel. Built on
+	// robotObj.Ctx it outlives the request: Recv() blocks until a frame arrives, so
+	// a robot that sends none - docked or asleep - never lets the loop below get
+	// back to its r.Context().Done() case, and the goroutine plus its gRPC stream
+	// leak every time the browser goes away. Cancelling makes Recv() return.
+	ctx, cancel := context.WithCancel(robotObj.Ctx)
+	defer cancel()
+	// Take the robot's feed, cancelling whichever handler held it: a second tab, a
+	// reload or a retry must stop the previous stream, not stack another on top.
+	gen, replaced := claimCamStream(esn, cancel)
+	// Every exit path lands here. The ownership check is what stops a superseded
+	// handler - which now does wake up, because its context is cancellable - from
+	// switching the camera off underneath the handler that displaced it.
+	defer func() {
+		if releaseCamStream(esn, gen) {
+			enableImageStreaming(robotObj, false)
+		}
+	}()
+	// Started before the wait below, so a browser that goes away during it is
+	// noticed rather than leaving this handler to open a feed nobody is reading.
+	go func() {
+		<-r.Context().Done()
+		cancel()
+	}()
+	if replaced {
+		// Give the robot a moment to drop the CameraFeed just cancelled.
 		time.Sleep(time.Second / 2)
 	}
-	robotObj.Vector.Conn.EnableImageStreaming(
-		robotObj.Ctx,
-		&vectorpb.EnableImageStreamingRequest{
-			Enable: true,
-		},
-	)
+	enableImageStreaming(robotObj, true)
 	var client vectorpb.ExternalInterface_CameraFeedClient
 	client, err = robotObj.Vector.Conn.CameraFeed(
-		robotObj.Ctx,
+		ctx,
 		&vectorpb.CameraFeedRequest{},
 	)
 	if err != nil {
@@ -572,38 +621,34 @@ func camStreamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=--boundary")
 	multi := io.MultiWriter(w)
-	robots[robotIndex].CamStreaming = true
 	for {
 		select {
 		case <-r.Context().Done():
-			robotObj.Vector.Conn.EnableImageStreaming(
-				robotObj.Ctx,
-				&vectorpb.EnableImageStreamingRequest{
-					Enable: false,
-				},
-			)
-			robots[robotIndex].CamStreaming = false
 			return
 		default:
-			if robots[robotIndex].CamStreaming {
-				response, err := client.Recv()
-				if err == nil {
-					imageBytes := response.GetData()
-					img, _, _ := image.Decode(bytes.NewReader(imageBytes))
-					fmt.Fprintf(multi, "--boundary\r\nContent-Type: image/jpeg\r\n\r\n")
-					jpeg.Encode(multi, img, &jpeg.Options{
-						Quality: 50,
-					})
-				}
-			} else {
-				robotObj.Vector.Conn.EnableImageStreaming(
-					robotObj.Ctx,
-					&vectorpb.EnableImageStreamingRequest{
-						Enable: false,
-					},
-				)
+			// False once stop_cam_stream, removeRobot or a newer handler has taken
+			// the feed away.
+			if !isCamStreaming(esn) {
 				return
 			}
+			response, err := client.Recv()
+			if err != nil {
+				// Cancelled above, or the robot dropped the stream. Returning also
+				// ends the old behaviour of spinning this loop hot on a persistent
+				// Recv error while the request was still alive.
+				return
+			}
+			imageBytes := response.GetData()
+			img, _, err := image.Decode(bytes.NewReader(imageBytes))
+			if err != nil {
+				// A truncated or empty frame used to reach jpeg.Encode as a nil
+				// image.Image, which panics and takes the process with it.
+				continue
+			}
+			fmt.Fprintf(multi, "--boundary\r\nContent-Type: image/jpeg\r\n\r\n")
+			jpeg.Encode(multi, img, &jpeg.Options{
+				Quality: 50,
+			})
 		}
 	}
 }
