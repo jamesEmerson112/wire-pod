@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/fforchino/vector-go-sdk/pkg/vectorpb"
@@ -23,6 +24,34 @@ import (
 )
 
 var serverFiles string = "./webroot/sdkapp"
+
+const (
+	// One round trip to a robot that is answering is tens of milliseconds on a LAN.
+	// This is where we give up and call the probe lost rather than let the
+	// dashboard's poller queue behind a robot that has stopped responding.
+	npTimeout = 5 * time.Second
+	// Sent by the latency probe. Only the round trip is measured, never the answer,
+	// so these exist to form a well-shaped request rather than to negotiate
+	// anything. MinHostVersion is 0 so the robot has no cause to reject on our
+	// account, and an UNSUPPORTED verdict would still be a completed round trip.
+	npClientVersion  = 5
+	npMinHostVersion = 0
+	npProbeName      = "ProtocolVersion"
+)
+
+// netProbe is the body of /api-sdk/net_probe. The byte counters are raw running
+// totals rather than a rate: the page differences two readings, so the averaging
+// window is the page's choice and the server holds no state for it. Probe names
+// the RPC that was timed, so the page can attribute the number it prints instead
+// of hardcoding a name that would silently go stale if this changed again.
+type netProbe struct {
+	RttMs     float64 `json:"rttMs"`
+	Probe     string  `json:"probe"`
+	Target    string  `json:"target"`
+	CamBytes  uint64  `json:"camBytes"`
+	CamFrames uint64  `json:"camFrames"`
+	CamOn     bool    `json:"camOn"`
+}
 
 func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 	robotObj, robotIndex, err := getRobot(r.FormValue("serial"))
@@ -42,6 +71,61 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/api-sdk/conn_test":
 		// getRobot does connection check and will return error if failed
 		fmt.Fprint(w, "success")
+		return
+	case r.URL.Path == "/api-sdk/net_probe":
+		// One timed round trip, over the cheapest call the robot will answer.
+		//
+		// Deliberately not BatteryState, which is what this package uses as a
+		// liveness check everywhere else. Timed against a robot on a LAN that pings
+		// in 2ms, BatteryState, VersionState and IsImageStreamingEnabled all come
+		// back at a median of about 59ms. Three unrelated calls agreeing on one
+		// figure is the robot's engine tick, not the network: they are serviced by
+		// the engine loop rather than answered at the gateway. Reporting that as
+		// LATENCY in a connectivity panel would be measuring how often the robot
+		// looks at its inbox. ProtocolVersion is answered without going to the
+		// engine and lands at about 14ms against the same robot, against 3ms for a
+		// bare TCP connect to the same port, so it is much the better proxy for the
+		// link itself.
+		//
+		// Only the round trip is measured, never the verdict, so nothing here reads
+		// resp.Result. 60 consecutive calls at the dashboard's polling rate left the
+		// robot answering BatteryState normally, which is what made it safe to poll.
+		//
+		// The outer ctx is robotObj.Ctx, which is context.Background() and never
+		// expires, so shadow it the way get_battery does. getRobot has already run
+		// in the preamble, so the connection is warm and this times an RPC rather
+		// than a TLS handshake. The exception is the first request after connTimer
+		// drops an idle robot, which also pays for the dial.
+		ctx, cancel := context.WithTimeout(r.Context(), npTimeout)
+		defer cancel()
+		start := time.Now()
+		_, err := robot.Conn.ProtocolVersion(ctx, &vectorpb.ProtocolVersionRequest{
+			ClientVersion:  npClientVersion,
+			MinHostVersion: npMinHostVersion,
+		})
+		rtt := time.Since(start)
+		if err != nil {
+			// Deliberately not reported as a slow sample. A failed RPC took however
+			// long the timeout was, which says nothing about the link, so the page
+			// counts this as a lost probe instead of averaging npTimeout into the
+			// latency figure.
+			fmt.Fprint(w, "error: "+err.Error())
+			return
+		}
+		camBytes, camFrames := readCamMeter(robotObj.ESN)
+		jsonBytes, err := json.Marshal(netProbe{
+			RttMs:     float64(rtt.Microseconds()) / 1000,
+			Probe:     npProbeName,
+			Target:    robotObj.Target,
+			CamBytes:  camBytes,
+			CamFrames: camFrames,
+			CamOn:     isCamStreaming(robotObj.ESN),
+		})
+		if err != nil {
+			fmt.Fprint(w, "error: "+err.Error())
+			return
+		}
+		fmt.Fprint(w, string(jsonBytes))
 		return
 	case r.URL.Path == "/api-sdk/alexa_sign_in":
 		robot.Conn.AlexaOptIn(ctx, &vectorpb.AlexaOptInRequest{
@@ -662,6 +746,9 @@ func camStreamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=--boundary")
 	multi := io.MultiWriter(w)
+	// Resolved once rather than per frame: the lookup needs robotsMu and the loop
+	// below runs at the robot's frame rate.
+	meter := getCamMeter(esn)
 	for {
 		select {
 		case <-r.Context().Done():
@@ -680,6 +767,13 @@ func camStreamHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			imageBytes := response.GetData()
+			// Counted before the decode, because a frame that fails to decode still
+			// crossed the wire and this is measuring the link rather than the picture.
+			// These are the bytes the robot sent, which is deliberately not what goes
+			// out to the browser below: that is re-encoded at quality 50, so only the
+			// inbound count answers "how fast is the link to the robot".
+			atomic.AddUint64(&meter.bytes, uint64(len(imageBytes)))
+			atomic.AddUint64(&meter.frames, 1)
 			img, _, err := image.Decode(bytes.NewReader(imageBytes))
 			if err != nil {
 				// A truncated or empty frame used to reach jpeg.Encode as a nil

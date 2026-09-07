@@ -3,6 +3,7 @@ package sdkapp
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +48,7 @@ func resetSdkState(esn string) {
 	camGen = 0
 	eventStreams = map[string]*eventStream{}
 	eventGen = 0
+	camMeters = map[string]*camMeter{}
 }
 
 // TestCamStreamHandoffKeepsCameraOn is the regression test for "serialize camera
@@ -399,4 +401,96 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("condition not met within the deadline")
+}
+
+// --- camera byte meter -----------------------------------------------------
+//
+// These cover the state behind the throughput readout, not the endpoint that
+// serves it. SdkapiHandler needs a real robot on the other end of a gRPC
+// connection, so /api-sdk/net_probe itself is covered by inspection and by the
+// live check against the robot, the same caveat as the camera and stim work.
+
+// TestCamMeterKeepsRobotsApart pins the thing that made the old code key state by
+// slice index a bug: two robots streaming at once must not be counted together.
+func TestCamMeterKeepsRobotsApart(t *testing.T) {
+	const esnA = "00e20100"
+	const esnB = "00e20101"
+	resetSdkState(esnA)
+
+	a := getCamMeter(esnA)
+	b := getCamMeter(esnB)
+	if a == b {
+		t.Fatal("two ESNs share one meter")
+	}
+
+	atomic.AddUint64(&a.bytes, 1500)
+	atomic.AddUint64(&a.frames, 1)
+	atomic.AddUint64(&b.bytes, 40)
+	atomic.AddUint64(&b.frames, 2)
+
+	if gotBytes, gotFrames := readCamMeter(esnA); gotBytes != 1500 || gotFrames != 1 {
+		t.Fatalf("esnA: got %d bytes / %d frames, want 1500 / 1", gotBytes, gotFrames)
+	}
+	if gotBytes, gotFrames := readCamMeter(esnB); gotBytes != 40 || gotFrames != 2 {
+		t.Fatalf("esnB: got %d bytes / %d frames, want 40 / 2", gotBytes, gotFrames)
+	}
+
+	// An ESN nobody has streamed reads zero rather than panicking, because
+	// net_probe answers for a robot whose camera has never been opened.
+	if gotBytes, gotFrames := readCamMeter("00e20102"); gotBytes != 0 || gotFrames != 0 {
+		t.Fatalf("unseen esn: got %d bytes / %d frames, want 0 / 0", gotBytes, gotFrames)
+	}
+}
+
+// TestCamMeterCountsExactlyUnderConcurrency is the one that earns -race. The
+// frame loop adds without holding robotsMu, and net_probe reads from an HTTP
+// handler on another goroutine, so the counters have to be genuinely atomic and
+// not merely unlocked. Losing an update would show up here as a short total.
+func TestCamMeterCountsExactlyUnderConcurrency(t *testing.T) {
+	const esn = "00e20100"
+	const writers = 8
+	const perWriter = 2000
+	const frameSize = 1234
+	resetSdkState(esn)
+
+	m := getCamMeter(esn)
+
+	stop := make(chan struct{})
+	var readerWg sync.WaitGroup
+	readerWg.Add(1)
+	go func() {
+		defer readerWg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				// Reads through the same accessor net_probe uses, so the map lookup
+				// under robotsMu runs concurrently with the lock-free adds.
+				readCamMeter(esn)
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perWriter; j++ {
+				atomic.AddUint64(&m.bytes, frameSize)
+				atomic.AddUint64(&m.frames, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	readerWg.Wait()
+
+	wantBytes := uint64(writers * perWriter * frameSize)
+	wantFrames := uint64(writers * perWriter)
+	gotBytes, gotFrames := readCamMeter(esn)
+	if gotBytes != wantBytes || gotFrames != wantFrames {
+		t.Fatalf("got %d bytes / %d frames, want %d / %d", gotBytes, gotFrames, wantBytes, wantFrames)
+	}
 }
