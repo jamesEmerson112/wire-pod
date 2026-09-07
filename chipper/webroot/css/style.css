@@ -1658,6 +1658,10 @@ input.vb-talk-field:focus {
   display: inline-flex;
   align-items: center;
   margin: 0;
+  /* the global button rule (top of this file) hands every <button> a fixed 170px
+     and a drop shadow; the RUN chip in the connectivity panel is a real button */
+  width: auto;
+  box-shadow: none;
   padding: 3px 10px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   background: transparent;
@@ -1687,6 +1691,17 @@ input.vb-talk-field:focus {
   background: var(--vb-accent);
   border-color: var(--vb-accent);
   color: #0b0b0b;
+}
+
+/* the RUN chip in the connectivity panel is the one chip that is a real button,
+   and it spends its measurement window disabled; without this it looks idle */
+.vb-chip:disabled,
+.vb-chip:disabled:hover {
+  cursor: default;
+  opacity: 0.55;
+  color: var(--vb-muted);
+  border-color: rgba(255, 255, 255, 0.14);
+  background: transparent;
 }
 
 /* the log block is its own darker well in the mockup, not a panel surface */
