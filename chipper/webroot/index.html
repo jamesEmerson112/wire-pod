@@ -60,8 +60,6 @@
       </div>
       <hr />
 
-      <div id="botStatusStrip"></div>
-
       <div id="section-intents" style="display: none">
         <h2 id="foldable-add" onclick="toggleSection('content-add', 'content-edit')">
           <span>+</span>
@@ -240,13 +238,14 @@
 <script src="./js/ui.js"></script>
 <script src="./sdkapp/js/common.js"></script>
 <script src="./js/battery.js"></script>
+<script src="./js/vectorbrain.js"></script>
 <!-- <script src="./sdkapp/js/main.js"></script> -->
 <script>
   checkInited();
   updateIntentSelection("editSelect");
   updateIntentSelection("deleteSelect");
   createIntentSelect("intentAddSelect");
-  processBotStats();
+  initVectorBrain();
 </script>
 
 </html>

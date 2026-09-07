@@ -739,3 +739,234 @@ input[type='checkbox']:checked:after {
 @keyframes blink {
   50% { opacity: 0; }
 }
+
+/* ===== Vector Brain dashboard ===== */
+/* Mounted into #botStats on index.html by js/vectorbrain.js. The .vb-mount
+   class is what releases the fixed 50px strip height above; without it this
+   element stays the battery-card row that sdkapp/settings.html still uses. */
+#botStats.vb-mount {
+  display: block;
+  height: auto;
+  width: 100%;
+  max-width: 950px;
+  margin: 0 auto 1rem auto;
+  padding: 0 1rem;
+  box-sizing: border-box;
+  text-align: left;
+}
+
+.vb-empty {
+  font-family: var(--body-font-family);
+  font-size: 0.5em;
+  color: var(--bg-color-alt);
+  text-align: center;
+  padding: 12px 0;
+}
+
+.vb-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  justify-content: center;
+}
+
+.vb-bot {
+  flex: 1 1 300px;
+  max-width: 460px;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(30, 30, 30, 0.6);
+  font-family: var(--body-font-family);
+}
+
+.vb-bot-down {
+  opacity: 0.55;
+}
+
+.vb-bot-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vb-esn {
+  font-size: 0.6em;
+  color: var(--fg-color);
+  letter-spacing: 1px;
+}
+
+.vb-sub {
+  font-size: 0.4em;
+  color: var(--bg-color-alt);
+}
+
+.vb-label {
+  font-size: 0.35em;
+  letter-spacing: 2px;
+  color: var(--bg-color-alt);
+  margin-top: 10px;
+}
+
+.vb-readouts {
+  display: flex;
+  gap: 24px;
+  margin-top: 6px;
+}
+
+.vb-readout {
+  flex: 0 0 auto;
+}
+
+.vb-value {
+  font-size: 0.7em;
+  color: var(--text-color);
+}
+
+/* Battery level bar. Colours reuse the same three theme variables the old
+   battery cards used, so a UI accent change still carries through. */
+.vb-bar {
+  width: 100%;
+  height: 6px;
+  margin-top: 8px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.vb-bar-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--fg-color);
+  transition: width 0.4s ease;
+}
+
+.vb-bar-mid {
+  background: var(--medium-battery);
+}
+
+.vb-bar-low {
+  background: var(--low-battery);
+}
+
+.vb-stats {
+  margin-top: 4px;
+  max-height: 132px;
+  overflow-y: auto;
+  font-family: Consolas, 'Cascadia Mono', Menlo, monospace;
+  font-size: 0.36em;
+}
+
+.vb-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 1px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.vb-stat-k {
+  color: var(--bg-color-alt);
+}
+
+.vb-stat-v {
+  color: var(--text-color);
+  white-space: nowrap;
+}
+
+.vb-cam {
+  margin-top: 10px;
+}
+
+/* The global button rule is a fixed 170px; the card needs a compact one. */
+.vb-cam-btn {
+  width: auto !important;
+  padding: 3px 12px;
+  font-size: 0.4em;
+  border: 1px solid var(--fg-color);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-color);
+  cursor: pointer;
+  font-family: var(--body-font-family);
+}
+
+.vb-cam-btn:hover,
+.vb-cam-on {
+  background: var(--fg-color);
+  color: var(--text-color-alt);
+}
+
+.vb-cam-frame:empty {
+  display: none;
+}
+
+.vb-cam-frame {
+  margin-top: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+  line-height: 0;
+}
+
+.vb-cam-img {
+  width: 100%;
+  display: block;
+}
+
+.vb-log {
+  margin-top: 16px;
+}
+
+.vb-log-body {
+  margin-top: 4px;
+  border: 1px solid var(--fg-color);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.25);
+  font-family: Consolas, 'Cascadia Mono', Menlo, monospace;
+  font-size: 0.36em;
+  overflow-x: auto;
+}
+
+.vb-log-row {
+  display: flex;
+  gap: 10px;
+  white-space: nowrap;
+  padding: 1px 0;
+}
+
+.vb-log-t {
+  color: #555;
+  flex: 0 0 auto;
+}
+
+.vb-log-l {
+  flex: 0 0 46px;
+}
+
+.vb-log-c {
+  flex: 0 0 60px;
+}
+
+.vb-log-b {
+  flex: 0 0 70px;
+  color: #777;
+}
+
+.vb-log-m {
+  color: var(--text-color);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media screen and (max-width: 768px) {
+  .vb-bot {
+    flex: 1 1 100%;
+    max-width: none;
+  }
+}

@@ -39,7 +39,9 @@ type BotStatus struct {
 func GetConnectionStatus() []BotStatus {
 	JdocsPingerBots.mu.Lock()
 	defer JdocsPingerBots.mu.Unlock()
-	var statuses []BotStatus
+	// start from an empty slice, not nil, so a server that knows no robots still
+	// encodes as [] instead of null and callers can iterate the result directly
+	statuses := []BotStatus{}
 	for _, robot := range vars.BotInfo.Robots {
 		status := BotStatus{
 			Esn:       robot.Esn,
