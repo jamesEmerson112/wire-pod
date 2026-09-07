@@ -416,4 +416,6 @@ function getCurrentSettings() {
   };
 }
 
-renderBatteryInfo(esn);
+// Battery is rendered by the Vector Brain header (vectorbrain.js). Calling
+// renderBatteryInfo(esn) here too would run a second 3s poller and open a
+// duplicate SDK connection for the same robot.
