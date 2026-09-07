@@ -74,7 +74,6 @@ func camOpMu(esn string) *sync.Mutex {
 	return mu
 }
 
-
 // call with robotsMu held
 func setCamStreamingLocked(esn string, streaming bool) {
 	for i := range robots {
@@ -141,6 +140,129 @@ func stopCamStream(esn string) {
 	if cur != nil {
 		cur.cancel()
 	}
+}
+
+// One entry per robot with a live stim receiver. Keyed by ESN for the same reason
+// camStreams is: the goroutine outlives the request that started it, and an index
+// captured back then names a different robot once removeRobot filters the slice.
+type eventStream struct {
+	gen    uint64
+	cancel context.CancelFunc
+}
+
+var eventStreams = map[string]*eventStream{}
+var eventGen uint64
+
+// call with robotsMu held
+func setEventsStreamingLocked(esn string, streaming bool) {
+	for i := range robots {
+		if strings.EqualFold(esn, robots[i].ESN) {
+			robots[i].EventsStreaming = streaming
+			return
+		}
+	}
+}
+
+// claimEventStream gives the caller the robot's stim stream if nobody holds it.
+// Unlike claimCamStream this deliberately does NOT displace the current owner: the
+// camera has no stop protocol, so a reloaded <img> must be able to take the feed,
+// whereas the stim graph has an explicit stop_event_stream and a second begin is
+// just a double click, which should cost nothing rather than tear down a working
+// stream and blank the graph.
+//
+// Folding the old "already running" check into the claim also closes the
+// check-then-act window between reading the flag and setting it, where two
+// simultaneous begins could both read false.
+func claimEventStream(esn string, cancel context.CancelFunc) (uint64, bool) {
+	robotsMu.Lock()
+	defer robotsMu.Unlock()
+	if eventStreams[esn] != nil {
+		return 0, false
+	}
+	eventGen++
+	gen := eventGen
+	eventStreams[esn] = &eventStream{gen: gen, cancel: cancel}
+	setEventsStreamingLocked(esn, true)
+	return gen, true
+}
+
+// releaseEventStream drops ownership if the caller still holds it. Unlike the
+// camera this needs no operation lock, and the reason is structural rather than
+// incidental: the camera's off switch is a separate RPC that can be issued and
+// then land late, while this stream's off switch is cancelling its context, which
+// can never arrive too late to matter.
+func releaseEventStream(esn string, gen uint64) bool {
+	robotsMu.Lock()
+	defer robotsMu.Unlock()
+	cur := eventStreams[esn]
+	if cur == nil || cur.gen != gen {
+		return false
+	}
+	delete(eventStreams, esn)
+	setEventsStreamingLocked(esn, false)
+	return true
+}
+
+// stopEventStream cancels the receiver and frees ownership in the same critical
+// section. Releasing here rather than leaving it to the goroutine is what stops a
+// begin arriving straight after a stop from being refused because the old receiver
+// has not woken up yet, which would leave the poller reading "must start event
+// stream" until it gave up.
+func stopEventStream(esn string) {
+	robotsMu.Lock()
+	cur := eventStreams[esn]
+	delete(eventStreams, esn)
+	setEventsStreamingLocked(esn, false)
+	setStimStateLocked(esn, 0)
+	robotsMu.Unlock()
+	if cur != nil {
+		cur.cancel()
+	}
+}
+
+func isEventStreaming(esn string) bool {
+	robotsMu.Lock()
+	defer robotsMu.Unlock()
+	for i := range robots {
+		if strings.EqualFold(esn, robots[i].ESN) {
+			return robots[i].EventsStreaming
+		}
+	}
+	return false
+}
+
+func stimState(esn string) float32 {
+	robotsMu.Lock()
+	defer robotsMu.Unlock()
+	for i := range robots {
+		if strings.EqualFold(esn, robots[i].ESN) {
+			return robots[i].StimState
+		}
+	}
+	return 0
+}
+
+// call with robotsMu held
+func setStimStateLocked(esn string, value float32) {
+	for i := range robots {
+		if strings.EqualFold(esn, robots[i].ESN) {
+			robots[i].StimState = value
+			return
+		}
+	}
+}
+
+// setStimStateIfOwner drops writes from a receiver that has been superseded, so a
+// goroutine still unwinding from a cancelled Recv cannot overwrite the value the
+// current owner has just published.
+func setStimStateIfOwner(esn string, gen uint64, value float32) {
+	robotsMu.Lock()
+	defer robotsMu.Unlock()
+	cur := eventStreams[esn]
+	if cur == nil || cur.gen != gen {
+		return
+	}
+	setStimStateLocked(esn, value)
 }
 
 type Robot struct {
@@ -301,7 +423,9 @@ func removeRobot(serial, source string) {
 			// Cancels the feed as well as clearing the flag: a handler parked in
 			// Recv on a robot that sends no frames cannot see the flag at all.
 			stopCamStream(robots[ind].ESN)
-			robots[ind].EventsStreaming = false
+			// Cancels the receiver as well as clearing the flag, matching stopCamStream
+			// on the line above: a goroutine parked in Recv cannot see the flag at all.
+			stopEventStream(robots[ind].ESN)
 			robots[ind].BcAssumption = false
 			// give time for all of that to stop
 			time.Sleep(time.Second * 3)

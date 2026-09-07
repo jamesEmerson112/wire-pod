@@ -381,19 +381,23 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "success")
 		return
 	case r.URL.Path == "/api-sdk/begin_event_stream":
-		// setup websocket
-		if robots[robotIndex].EventsStreaming {
-			// Already running. Without this, re-selecting Stim - which the drawer
-			// makes easy, and which the tiles' inline onclick allows twice in a row -
-			// spawns a second EventStream goroutine against the robot that the first
-			// one's stop can no longer reach.
+		// Its own context, not the robot's, so stop_event_stream can actually end
+		// this. Recv blocks until the robot sends something, so a receiver on the
+		// robot's background context could only ever notice a stop after the next
+		// stim event, which on a quiet robot never comes.
+		streamCtx, cancel := context.WithCancel(robotObj.Ctx)
+		gen, ok := claimEventStream(robotObj.ESN, cancel)
+		if !ok {
+			// Already running. A second begin is a double click rather than a
+			// request to restart: the drawer makes re-selecting Stim easy and the
+			// tiles' inline onclick allows it twice in a row.
+			cancel()
 			fmt.Fprint(w, "done")
 			return
 		}
-		robots[robotIndex].EventsStreaming = true
 		go func() {
 			client, err := robot.Conn.EventStream(
-				ctx,
+				streamCtx,
 				&vectorpb.EventRequest{
 					ListType: &vectorpb.EventRequest_WhiteList{
 						WhiteList: &vectorpb.FilterList{
@@ -405,41 +409,23 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 			)
 			// w belongs to a request that returns below, long before this goroutine
 			// is done, so nothing here may write to it. On error client is nil and
-			// the loop's Recv would panic, hence the return that was missing.
+			// the loop's Recv would panic.
 			if err != nil {
 				logger.Println("event stream: " + err.Error())
-				robots[robotIndex].EventsStreaming = false
+				releaseEventStream(robotObj.ESN, gen)
 				return
 			}
-			for {
-				if robots[robotIndex].EventsStreaming {
-					resp, err := client.Recv()
-					if err != nil {
-						logger.Println("event stream: " + err.Error())
-						robots[robotIndex].EventsStreaming = false
-						return
-					}
-					stimInfo := resp.Event.GetStimulationInfo()
-					stimInfoString := fmt.Sprint(stimInfo)
-					if strings.Contains(stimInfoString, "velocity") {
-						// velocity in the string means there is a value
-						robots[robotIndex].StimState = stimInfo.Value
-					}
-				} else {
-					return
-				}
-			}
+			runEventStream(robotObj.ESN, gen, client)
 		}()
 		fmt.Fprint(w, "done")
 		return
 	case r.URL.Path == "/api-sdk/stop_event_stream":
-		robots[robotIndex].EventsStreaming = false
-		robots[robotIndex].StimState = 0
+		stopEventStream(robotObj.ESN)
 		fmt.Fprint(w, "done")
 		return
 	case r.URL.Path == "/api-sdk/get_stim_status":
-		if robots[robotIndex].EventsStreaming {
-			fmt.Fprint(w, robots[robotIndex].StimState)
+		if isEventStreaming(robotObj.ESN) {
+			fmt.Fprint(w, stimState(robotObj.ESN))
 			return
 		}
 		fmt.Fprint(w, "error: must start event stream")
@@ -558,6 +544,35 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 		
 		fmt.Fprint(w, "success")
 		return
+	}
+}
+
+// eventReceiver is the part of ExternalInterface_EventStreamClient this loop uses.
+// The generated client satisfies it structurally, with no adapter and no change at
+// the production call site, and it lets the test drive the loop without a robot.
+type eventReceiver interface {
+	Recv() (*vectorpb.EventResponse, error)
+}
+
+// runEventStream pumps stim events until the stream ends. It gives ownership back
+// on the way out, generation checked, so a receiver that has already been
+// superseded cannot clear the state of the one that replaced it.
+func runEventStream(esn string, gen uint64, client eventReceiver) {
+	defer releaseEventStream(esn, gen)
+	for {
+		resp, err := client.Recv()
+		if err != nil {
+			// Cancelled by stop_event_stream or removeRobot, or the robot dropped
+			// the stream. Either way this receiver is finished. The old loop tested
+			// a flag here instead, which it could only reach after Recv returned.
+			logger.Println("event stream: " + err.Error())
+			return
+		}
+		stimInfo := resp.Event.GetStimulationInfo()
+		if strings.Contains(fmt.Sprint(stimInfo), "velocity") {
+			// velocity in the string means there is a value
+			setStimStateIfOwner(esn, gen, stimInfo.Value)
+		}
 	}
 }
 
