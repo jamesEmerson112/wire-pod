@@ -46,6 +46,35 @@ type camStream struct {
 var camStreams = map[string]*camStream{}
 var camGen uint64
 
+// camOps holds one lock per robot, taken across "claim ownership and turn the
+// camera on" and across "give ownership back and turn the camera off". Each of
+// those is a registry update plus an RPC, and it is the RPC that has to be
+// ordered: releaseCamStream can hand ownership to a replacement while the
+// departing handler is still inside EnableImageStreaming(false), and that disable
+// then lands on the new owner's feed and kills it.
+//
+// Entries are never removed. The key set is bounded by the robots that have ever
+// opened a camera stream in this process, not by request count, so it does not
+// grow without limit; and deleting a mutex another goroutine has already read out
+// of this map would need a refcount under a further lock to be safe, which is more
+// machinery than the few bytes it would reclaim. Do not add cleanup here.
+var camOps = map[string]*sync.Mutex{}
+
+// camOpMu must be called with robotsMu NOT held: it takes robotsMu itself, and
+// every other path takes a camera op lock first and robotsMu second. Calling this
+// from inside a region that already holds robotsMu would invert that order.
+func camOpMu(esn string) *sync.Mutex {
+	robotsMu.Lock()
+	defer robotsMu.Unlock()
+	mu, ok := camOps[esn]
+	if !ok {
+		mu = &sync.Mutex{}
+		camOps[esn] = mu
+	}
+	return mu
+}
+
+
 // call with robotsMu held
 func setCamStreamingLocked(esn string, streaming bool) {
 	for i := range robots {

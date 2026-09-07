@@ -73,7 +73,10 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 		hue := r.FormValue("hue")
 		sat := r.FormValue("sat")
 		setCustomEyeColor(robotObj, hue, sat)
-		fmt.Fprintf(w, hue+sat)
+		// Fprint, not Fprintf: these are form values, and a % in one used to render
+		// as %!s(MISSING). Also what made go vet fail the package, which blocked
+		// go test now that the package has tests.
+		fmt.Fprint(w, hue+sat)
 		return
 	case r.URL.Path == "/api-sdk/volume":
 		volume := r.FormValue("volume")
@@ -563,7 +566,9 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 // has been cancelled, and on a deadline because robotObj.Ctx is context.Background
 // and the SDK sets no per-call timeout: without one, a robot that has stopped
 // answering RPCs parks this goroutine in the very call meant to free it.
-func enableImageStreaming(robotObj Robot, enable bool) {
+// Declared as a variable, not a func, so sdkapp_test.go can substitute a fake and
+// assert the ordering of the on and off calls. Nothing in production reassigns it.
+var enableImageStreaming = func(robotObj Robot, enable bool) {
 	ctx, cancel := context.WithTimeout(robotObj.Ctx, time.Second*5)
 	defer cancel()
 	robotObj.Vector.Conn.EnableImageStreaming(
@@ -572,6 +577,34 @@ func enableImageStreaming(robotObj Robot, enable bool) {
 			Enable: enable,
 		},
 	)
+}
+
+// startCamStream takes the robot's feed and turns its camera on with both steps
+// under the robot's camera op lock, so a departing handler's disable cannot land
+// between them and leave the camera off under a live feed.
+func startCamStream(robotObj Robot, cancel context.CancelFunc) uint64 {
+	mu := camOpMu(robotObj.ESN)
+	mu.Lock()
+	defer mu.Unlock()
+	gen, replaced := claimCamStream(robotObj.ESN, cancel)
+	if replaced {
+		// Give the robot a moment to drop the CameraFeed just cancelled.
+		time.Sleep(time.Second / 2)
+	}
+	enableImageStreaming(robotObj, true)
+	return gen
+}
+
+// finishCamStream gives the feed back and turns the camera off, but only if this
+// handler still owns it. Same lock as startCamStream, which is what makes the
+// ownership check and the disable atomic against a replacement taking over.
+func finishCamStream(robotObj Robot, gen uint64) {
+	mu := camOpMu(robotObj.ESN)
+	mu.Lock()
+	defer mu.Unlock()
+	if releaseCamStream(robotObj.ESN, gen) {
+		enableImageStreaming(robotObj, false)
+	}
 }
 
 func camStreamHandler(w http.ResponseWriter, r *http.Request) {
@@ -588,28 +621,21 @@ func camStreamHandler(w http.ResponseWriter, r *http.Request) {
 	// leak every time the browser goes away. Cancelling makes Recv() return.
 	ctx, cancel := context.WithCancel(robotObj.Ctx)
 	defer cancel()
-	// Take the robot's feed, cancelling whichever handler held it: a second tab, a
-	// reload or a retry must stop the previous stream, not stack another on top.
-	gen, replaced := claimCamStream(esn, cancel)
-	// Every exit path lands here. The ownership check is what stops a superseded
-	// handler - which now does wake up, because its context is cancellable - from
-	// switching the camera off underneath the handler that displaced it.
-	defer func() {
-		if releaseCamStream(esn, gen) {
-			enableImageStreaming(robotObj, false)
-		}
-	}()
-	// Started before the wait below, so a browser that goes away during it is
-	// noticed rather than leaving this handler to open a feed nobody is reading.
+	// Started before the claim so a browser that goes away during the settle sleep
+	// inside startCamStream is noticed rather than leaving this handler to open a
+	// feed nobody is reading. cancel is idempotent and safe to call on a stream
+	// nobody has claimed yet.
 	go func() {
 		<-r.Context().Done()
 		cancel()
 	}()
-	if replaced {
-		// Give the robot a moment to drop the CameraFeed just cancelled.
-		time.Sleep(time.Second / 2)
-	}
-	enableImageStreaming(robotObj, true)
+	// Takes the robot's feed, cancelling whichever handler held it: a second tab, a
+	// reload or a retry must stop the previous stream, not stack another on top.
+	gen := startCamStream(robotObj, cancel)
+	// Every exit path lands here, and it only turns the camera off if this handler
+	// still owns the feed, so a superseded handler cannot switch it off underneath
+	// the handler that displaced it.
+	defer finishCamStream(robotObj, gen)
 	var client vectorpb.ExternalInterface_CameraFeedClient
 	client, err = robotObj.Vector.Conn.CameraFeed(
 		ctx,
