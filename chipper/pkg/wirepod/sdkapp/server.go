@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/fforchino/vector-go-sdk/pkg/vectorpb"
@@ -23,6 +24,34 @@ import (
 )
 
 var serverFiles string = "./webroot/sdkapp"
+
+const (
+	// One round trip to a robot that is answering is tens of milliseconds on a LAN.
+	// This is where we give up and call the probe lost rather than let the
+	// dashboard's poller queue behind a robot that has stopped responding.
+	npTimeout = 5 * time.Second
+	// Sent by the latency probe. Only the round trip is measured, never the answer,
+	// so these exist to form a well-shaped request rather than to negotiate
+	// anything. MinHostVersion is 0 so the robot has no cause to reject on our
+	// account, and an UNSUPPORTED verdict would still be a completed round trip.
+	npClientVersion  = 5
+	npMinHostVersion = 0
+	npProbeName      = "ProtocolVersion"
+)
+
+// netProbe is the body of /api-sdk/net_probe. The byte counters are raw running
+// totals rather than a rate: the page differences two readings, so the averaging
+// window is the page's choice and the server holds no state for it. Probe names
+// the RPC that was timed, so the page can attribute the number it prints instead
+// of hardcoding a name that would silently go stale if this changed again.
+type netProbe struct {
+	RttMs     float64 `json:"rttMs"`
+	Probe     string  `json:"probe"`
+	Target    string  `json:"target"`
+	CamBytes  uint64  `json:"camBytes"`
+	CamFrames uint64  `json:"camFrames"`
+	CamOn     bool    `json:"camOn"`
+}
 
 func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 	robotObj, robotIndex, err := getRobot(r.FormValue("serial"))
@@ -42,6 +71,61 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/api-sdk/conn_test":
 		// getRobot does connection check and will return error if failed
 		fmt.Fprint(w, "success")
+		return
+	case r.URL.Path == "/api-sdk/net_probe":
+		// One timed round trip, over the cheapest call the robot will answer.
+		//
+		// Deliberately not BatteryState, which is what this package uses as a
+		// liveness check everywhere else. Timed against a robot on a LAN that pings
+		// in 2ms, BatteryState, VersionState and IsImageStreamingEnabled all come
+		// back at a median of about 59ms. Three unrelated calls agreeing on one
+		// figure is the robot's engine tick, not the network: they are serviced by
+		// the engine loop rather than answered at the gateway. Reporting that as
+		// LATENCY in a connectivity panel would be measuring how often the robot
+		// looks at its inbox. ProtocolVersion is answered without going to the
+		// engine and lands at about 14ms against the same robot, against 3ms for a
+		// bare TCP connect to the same port, so it is much the better proxy for the
+		// link itself.
+		//
+		// Only the round trip is measured, never the verdict, so nothing here reads
+		// resp.Result. 60 consecutive calls at the dashboard's polling rate left the
+		// robot answering BatteryState normally, which is what made it safe to poll.
+		//
+		// The outer ctx is robotObj.Ctx, which is context.Background() and never
+		// expires, so shadow it the way get_battery does. getRobot has already run
+		// in the preamble, so the connection is warm and this times an RPC rather
+		// than a TLS handshake. The exception is the first request after connTimer
+		// drops an idle robot, which also pays for the dial.
+		ctx, cancel := context.WithTimeout(r.Context(), npTimeout)
+		defer cancel()
+		start := time.Now()
+		_, err := robot.Conn.ProtocolVersion(ctx, &vectorpb.ProtocolVersionRequest{
+			ClientVersion:  npClientVersion,
+			MinHostVersion: npMinHostVersion,
+		})
+		rtt := time.Since(start)
+		if err != nil {
+			// Deliberately not reported as a slow sample. A failed RPC took however
+			// long the timeout was, which says nothing about the link, so the page
+			// counts this as a lost probe instead of averaging npTimeout into the
+			// latency figure.
+			fmt.Fprint(w, "error: "+err.Error())
+			return
+		}
+		camBytes, camFrames := readCamMeter(robotObj.ESN)
+		jsonBytes, err := json.Marshal(netProbe{
+			RttMs:     float64(rtt.Microseconds()) / 1000,
+			Probe:     npProbeName,
+			Target:    robotObj.Target,
+			CamBytes:  camBytes,
+			CamFrames: camFrames,
+			CamOn:     isCamStreaming(robotObj.ESN),
+		})
+		if err != nil {
+			fmt.Fprint(w, "error: "+err.Error())
+			return
+		}
+		fmt.Fprint(w, string(jsonBytes))
 		return
 	case r.URL.Path == "/api-sdk/alexa_sign_in":
 		robot.Conn.AlexaOptIn(ctx, &vectorpb.AlexaOptInRequest{
@@ -73,7 +157,10 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 		hue := r.FormValue("hue")
 		sat := r.FormValue("sat")
 		setCustomEyeColor(robotObj, hue, sat)
-		fmt.Fprintf(w, hue+sat)
+		// Fprint, not Fprintf: these are form values, and a % in one used to render
+		// as %!s(MISSING). Also what made go vet fail the package, which blocked
+		// go test now that the package has tests.
+		fmt.Fprint(w, hue+sat)
 		return
 	case r.URL.Path == "/api-sdk/volume":
 		volume := r.FormValue("volume")
@@ -378,11 +465,23 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "success")
 		return
 	case r.URL.Path == "/api-sdk/begin_event_stream":
-		// setup websocket
-		robots[robotIndex].EventsStreaming = true
+		// Its own context, not the robot's, so stop_event_stream can actually end
+		// this. Recv blocks until the robot sends something, so a receiver on the
+		// robot's background context could only ever notice a stop after the next
+		// stim event, which on a quiet robot never comes.
+		streamCtx, cancel := context.WithCancel(robotObj.Ctx)
+		gen, ok := claimEventStream(robotObj.ESN, cancel)
+		if !ok {
+			// Already running. A second begin is a double click rather than a
+			// request to restart: the drawer makes re-selecting Stim easy and the
+			// tiles' inline onclick allows it twice in a row.
+			cancel()
+			fmt.Fprint(w, "done")
+			return
+		}
 		go func() {
 			client, err := robot.Conn.EventStream(
-				ctx,
+				streamCtx,
 				&vectorpb.EventRequest{
 					ListType: &vectorpb.EventRequest_WhiteList{
 						WhiteList: &vectorpb.FilterList{
@@ -392,38 +491,25 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 					ConnectionId: "wirepod",
 				},
 			)
+			// w belongs to a request that returns below, long before this goroutine
+			// is done, so nothing here may write to it. On error client is nil and
+			// the loop's Recv would panic.
 			if err != nil {
-				fmt.Fprint(w, err.Error())
+				logger.Println("event stream: " + err.Error())
+				releaseEventStream(robotObj.ESN, gen)
+				return
 			}
-			for {
-				if robots[robotIndex].EventsStreaming {
-					resp, err := client.Recv()
-					if err != nil {
-						fmt.Fprint(w, err.Error())
-						robots[robotIndex].EventsStreaming = false
-						return
-					}
-					stimInfo := resp.Event.GetStimulationInfo()
-					stimInfoString := fmt.Sprint(stimInfo)
-					if strings.Contains(stimInfoString, "velocity") {
-						// velocity in the string means there is a value
-						robots[robotIndex].StimState = stimInfo.Value
-					}
-				} else {
-					return
-				}
-			}
+			runEventStream(robotObj.ESN, gen, client)
 		}()
 		fmt.Fprint(w, "done")
 		return
 	case r.URL.Path == "/api-sdk/stop_event_stream":
-		robots[robotIndex].EventsStreaming = false
-		robots[robotIndex].StimState = 0
+		stopEventStream(robotObj.ESN)
 		fmt.Fprint(w, "done")
 		return
 	case r.URL.Path == "/api-sdk/get_stim_status":
-		if robots[robotIndex].EventsStreaming {
-			fmt.Fprint(w, robots[robotIndex].StimState)
+		if isEventStreaming(robotObj.ESN) {
+			fmt.Fprint(w, stimState(robotObj.ESN))
 			return
 		}
 		fmt.Fprint(w, "error: must start event stream")
@@ -433,7 +519,7 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "done")
 		return
 	case r.URL.Path == "/api-sdk/stop_cam_stream":
-		robots[robotIndex].CamStreaming = false
+		stopCamStream(robotObj.ESN)
 		fmt.Fprint(w, "done")
 		return
 	case r.URL.Path == "/api-sdk/get_image_ids":
@@ -545,25 +631,113 @@ func SdkapiHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// eventReceiver is the part of ExternalInterface_EventStreamClient this loop uses.
+// The generated client satisfies it structurally, with no adapter and no change at
+// the production call site, and it lets the test drive the loop without a robot.
+type eventReceiver interface {
+	Recv() (*vectorpb.EventResponse, error)
+}
+
+// runEventStream pumps stim events until the stream ends. It gives ownership back
+// on the way out, generation checked, so a receiver that has already been
+// superseded cannot clear the state of the one that replaced it.
+func runEventStream(esn string, gen uint64, client eventReceiver) {
+	defer releaseEventStream(esn, gen)
+	for {
+		resp, err := client.Recv()
+		if err != nil {
+			// Cancelled by stop_event_stream or removeRobot, or the robot dropped
+			// the stream. Either way this receiver is finished. The old loop tested
+			// a flag here instead, which it could only reach after Recv returned.
+			logger.Println("event stream: " + err.Error())
+			return
+		}
+		stimInfo := resp.Event.GetStimulationInfo()
+		if strings.Contains(fmt.Sprint(stimInfo), "velocity") {
+			// velocity in the string means there is a value
+			setStimStateIfOwner(esn, gen, stimInfo.Value)
+		}
+	}
+}
+
+// enableImageStreaming is the robot-side on/off switch for the camera. It runs on
+// robotObj.Ctx rather than the stream context because cleanup happens after that
+// has been cancelled, and on a deadline because robotObj.Ctx is context.Background
+// and the SDK sets no per-call timeout: without one, a robot that has stopped
+// answering RPCs parks this goroutine in the very call meant to free it.
+// Declared as a variable, not a func, so sdkapp_test.go can substitute a fake and
+// assert the ordering of the on and off calls. Nothing in production reassigns it.
+var enableImageStreaming = func(robotObj Robot, enable bool) {
+	ctx, cancel := context.WithTimeout(robotObj.Ctx, time.Second*5)
+	defer cancel()
+	robotObj.Vector.Conn.EnableImageStreaming(
+		ctx,
+		&vectorpb.EnableImageStreamingRequest{
+			Enable: enable,
+		},
+	)
+}
+
+// startCamStream takes the robot's feed and turns its camera on with both steps
+// under the robot's camera op lock, so a departing handler's disable cannot land
+// between them and leave the camera off under a live feed.
+func startCamStream(robotObj Robot, cancel context.CancelFunc) uint64 {
+	mu := camOpMu(robotObj.ESN)
+	mu.Lock()
+	defer mu.Unlock()
+	gen, replaced := claimCamStream(robotObj.ESN, cancel)
+	if replaced {
+		// Give the robot a moment to drop the CameraFeed just cancelled.
+		time.Sleep(time.Second / 2)
+	}
+	enableImageStreaming(robotObj, true)
+	return gen
+}
+
+// finishCamStream gives the feed back and turns the camera off, but only if this
+// handler still owns it. Same lock as startCamStream, which is what makes the
+// ownership check and the disable atomic against a replacement taking over.
+func finishCamStream(robotObj Robot, gen uint64) {
+	mu := camOpMu(robotObj.ESN)
+	mu.Lock()
+	defer mu.Unlock()
+	if releaseCamStream(robotObj.ESN, gen) {
+		enableImageStreaming(robotObj, false)
+	}
+}
+
 func camStreamHandler(w http.ResponseWriter, r *http.Request) {
-	robotObj, robotIndex, err := getRobot(r.FormValue("serial"))
+	robotObj, _, err := getRobot(r.FormValue("serial"))
 	if err != nil {
 		fmt.Fprint(w, "error: "+err.Error())
 		return
 	}
-	if robots[robotIndex].CamStreaming {
-		robots[robotIndex].CamStreaming = false
-		time.Sleep(time.Second / 2)
-	}
-	robotObj.Vector.Conn.EnableImageStreaming(
-		robotObj.Ctx,
-		&vectorpb.EnableImageStreamingRequest{
-			Enable: true,
-		},
-	)
+	esn := robotObj.ESN
+	// The feed has to hang off a context this handler can cancel. Built on
+	// robotObj.Ctx it outlives the request: Recv() blocks until a frame arrives, so
+	// a robot that sends none - docked or asleep - never lets the loop below get
+	// back to its r.Context().Done() case, and the goroutine plus its gRPC stream
+	// leak every time the browser goes away. Cancelling makes Recv() return.
+	ctx, cancel := context.WithCancel(robotObj.Ctx)
+	defer cancel()
+	// Started before the claim so a browser that goes away during the settle sleep
+	// inside startCamStream is noticed rather than leaving this handler to open a
+	// feed nobody is reading. cancel is idempotent and safe to call on a stream
+	// nobody has claimed yet.
+	go func() {
+		<-r.Context().Done()
+		cancel()
+	}()
+	// Takes the robot's feed, cancelling whichever handler held it: a second tab, a
+	// reload or a retry must stop the previous stream, not stack another on top.
+	gen := startCamStream(robotObj, cancel)
+	// Every exit path lands here, and it only turns the camera off if this handler
+	// still owns the feed, so a superseded handler cannot switch it off underneath
+	// the handler that displaced it.
+	defer finishCamStream(robotObj, gen)
 	var client vectorpb.ExternalInterface_CameraFeedClient
 	client, err = robotObj.Vector.Conn.CameraFeed(
-		robotObj.Ctx,
+		ctx,
 		&vectorpb.CameraFeedRequest{},
 	)
 	if err != nil {
@@ -572,38 +746,44 @@ func camStreamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=--boundary")
 	multi := io.MultiWriter(w)
-	robots[robotIndex].CamStreaming = true
+	// Resolved once rather than per frame: the lookup needs robotsMu and the loop
+	// below runs at the robot's frame rate.
+	meter := getCamMeter(esn)
 	for {
 		select {
 		case <-r.Context().Done():
-			robotObj.Vector.Conn.EnableImageStreaming(
-				robotObj.Ctx,
-				&vectorpb.EnableImageStreamingRequest{
-					Enable: false,
-				},
-			)
-			robots[robotIndex].CamStreaming = false
 			return
 		default:
-			if robots[robotIndex].CamStreaming {
-				response, err := client.Recv()
-				if err == nil {
-					imageBytes := response.GetData()
-					img, _, _ := image.Decode(bytes.NewReader(imageBytes))
-					fmt.Fprintf(multi, "--boundary\r\nContent-Type: image/jpeg\r\n\r\n")
-					jpeg.Encode(multi, img, &jpeg.Options{
-						Quality: 50,
-					})
-				}
-			} else {
-				robotObj.Vector.Conn.EnableImageStreaming(
-					robotObj.Ctx,
-					&vectorpb.EnableImageStreamingRequest{
-						Enable: false,
-					},
-				)
+			// False once stop_cam_stream, removeRobot or a newer handler has taken
+			// the feed away.
+			if !isCamStreaming(esn) {
 				return
 			}
+			response, err := client.Recv()
+			if err != nil {
+				// Cancelled above, or the robot dropped the stream. Returning also
+				// ends the old behaviour of spinning this loop hot on a persistent
+				// Recv error while the request was still alive.
+				return
+			}
+			imageBytes := response.GetData()
+			// Counted before the decode, because a frame that fails to decode still
+			// crossed the wire and this is measuring the link rather than the picture.
+			// These are the bytes the robot sent, which is deliberately not what goes
+			// out to the browser below: that is re-encoded at quality 50, so only the
+			// inbound count answers "how fast is the link to the robot".
+			atomic.AddUint64(&meter.bytes, uint64(len(imageBytes)))
+			atomic.AddUint64(&meter.frames, 1)
+			img, _, err := image.Decode(bytes.NewReader(imageBytes))
+			if err != nil {
+				// A truncated or empty frame used to reach jpeg.Encode as a nil
+				// image.Image, which panics and takes the process with it.
+				continue
+			}
+			fmt.Fprintf(multi, "--boundary\r\nContent-Type: image/jpeg\r\n\r\n")
+			jpeg.Encode(multi, img, &jpeg.Options{
+				Quality: 50,
+			})
 		}
 	}
 }
