@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/digital-dream-labs/hugh/grpc/client"
@@ -140,6 +141,47 @@ func stopCamStream(esn string) {
 	if cur != nil {
 		cur.cancel()
 	}
+}
+
+// camMeter counts what the camera feed has pulled off the wire for one robot.
+// That feed is the only bulk data path in this package, so it is the only honest
+// place to measure throughput from, and counting there costs the robot nothing:
+// the bytes are already arriving whether or not anyone is asking for a number.
+//
+// The counters are atomic rather than robotsMu-guarded because they are written
+// from the camera hot path. A 30fps feed would otherwise take the package mutex
+// thirty times a second per robot and contend with every status poll. The frame
+// loop instead resolves the pointer once, before it starts receiving, and then
+// adds without locking anything.
+type camMeter struct {
+	bytes  uint64
+	frames uint64
+}
+
+var camMeters = map[string]*camMeter{}
+
+// getCamMeter returns the robot's meter, creating it on first use. Entries are
+// never deleted, for the same reason camOps entries are not: the key set is
+// bounded by the robots you own, and a frame loop that has already read this
+// pointer out of the map must keep counting into something valid.
+func getCamMeter(esn string) *camMeter {
+	robotsMu.Lock()
+	defer robotsMu.Unlock()
+	m, ok := camMeters[esn]
+	if !ok {
+		m = &camMeter{}
+		camMeters[esn] = m
+	}
+	return m
+}
+
+// readCamMeter reports the running totals. They only ever climb, so a caller that
+// wants a rate takes two readings and divides the difference by the time between
+// them. That keeps the choice of averaging window with the caller and leaves no
+// per-request state on the server.
+func readCamMeter(esn string) (uint64, uint64) {
+	m := getCamMeter(esn)
+	return atomic.LoadUint64(&m.bytes), atomic.LoadUint64(&m.frames)
 }
 
 // One entry per robot with a live stim receiver. Keyed by ESN for the same reason

@@ -825,11 +825,337 @@
     setDrawer(false);
   }
 
+  // ------------------------------------------------------------------- network
+
+  // Rolling window behind the sparklines and the summary stats. At NET_POLL_MS that
+  // is about a minute and a half of history: long enough to show a wifi dropout,
+  // short enough that the numbers still describe what the link is doing now.
+  var NET_SAMPLES = 30;
+  var NET_POLL_MS = 3000;
+  // How long RUN measures over. Throughput is the difference of two byte counters,
+  // so the window has to be long enough that one frame either side cannot dominate.
+  var NET_RUN_MS = 5000;
+  // A measured result stays on screen this long before the live rate takes the
+  // readout back, so pressing RUN does not produce a number that vanishes on the
+  // next poll.
+  var NET_RUN_HOLD_MS = 15000;
+  // Floors for the sparkline y-axis. Without them a healthy link draws as dramatic
+  // noise, because a two millisecond spread gets amplified to fill the whole box.
+  var NET_FLOOR_MS = 25;
+  var NET_FLOOR_BPS = 32 * 1024;
+
+  var ELLIPSIS = String.fromCharCode(8230);
+
+  // Latency in ms and down rate in bytes/sec. A failed probe pushes null into
+  // netRtt: it still takes a slot so the loss figure counts it, but every statistic
+  // skips it.
+  var netRtt = [];
+  var netDown = [];
+  // Previous reading of the robot's byte counter, for differencing into a rate.
+  var netPrev = null;
+  var netTarget = "";
+  var netProbeName = "";
+  var netError = "";
+  var netRunning = false;
+  var netHoldUntil = 0;
+
+  // /api-sdk/ reports an unreachable robot as a plain-text "error: ..." body with
+  // HTTP 200. Handing that to .json() gets a SyntaxError whose message is about
+  // JSON tokens rather than about the robot, and that message is what would end up
+  // printed in the panel, so read the body as text and check it first. The other
+  // pollers on this page can get away with letting .json() reject because they only
+  // need to know that something failed, not what.
+  function fetchProbe(url) {
+    return fetch(url)
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("http " + response.status);
+        }
+        return response.text();
+      })
+      .then(function (text) {
+        var body = String(text).replace(/^\s+/, "");
+        if (body.slice(0, 6) === "error:") {
+          throw new Error(body.slice(6).replace(/^\s+/, ""));
+        }
+        try {
+          return JSON.parse(body);
+        } catch (e) {
+          throw new Error("unreadable response");
+        }
+      });
+  }
+
+  function netURL() {
+    return "/api-sdk/net_probe?serial=" + encodeURIComponent(vbEsn);
+  }
+
+  function netPush(arr, value) {
+    arr.push(value);
+    while (arr.length > NET_SAMPLES) {
+      arr.shift();
+    }
+  }
+
+  function netNumbers(arr) {
+    var out = [];
+    for (var i = 0; i < arr.length; i++) {
+      if (typeof arr[i] === "number" && isFinite(arr[i])) {
+        out.push(arr[i]);
+      }
+    }
+    return out;
+  }
+
+  function netMean(values) {
+    var total = 0;
+    for (var i = 0; i < values.length; i++) {
+      total += values[i];
+    }
+    return total / values.length;
+  }
+
+  // Mean absolute difference between consecutive samples. Deliberately not the
+  // RFC 3550 smoothed estimator: this one needs no warm-up and can be explained in
+  // one line, which matters more for a dashboard than statistical pedigree.
+  function netJitter(values) {
+    if (values.length < 2) {
+      return null;
+    }
+    var total = 0;
+    for (var i = 1; i < values.length; i++) {
+      total += Math.abs(values[i] - values[i - 1]);
+    }
+    return total / (values.length - 1);
+  }
+
+  function netRate(bytesPerSec) {
+    if (typeof bytesPerSec !== "number" || !isFinite(bytesPerSec) || bytesPerSec < 0) {
+      return "--";
+    }
+    if (bytesPerSec >= 1024 * 1024) {
+      return (bytesPerSec / (1024 * 1024)).toFixed(1) + " MB/s";
+    }
+    return Math.round(bytesPerSec / 1024) + " kB/s";
+  }
+
+  function netShort(text) {
+    var s = String(text === null || text === undefined ? "" : text).replace(/\s+/g, " ");
+    s = s.replace(/^\s+|\s+$/g, "");
+    if (s.length > 40) {
+      s = s.slice(0, 39) + ELLIPSIS;
+    }
+    return s;
+  }
+
+  // Rewrites a polyline in place. The SVG is authored as viewBox "0 0 200 34" with
+  // preserveAspectRatio="none", so these coordinates live in that fixed space and
+  // the browser stretches them to whatever width the panel happens to have.
+  function renderSpark(id, samples, floor) {
+    var line = el(id);
+    if (!line) {
+      return;
+    }
+    var pts = netNumbers(samples);
+    if (pts.length < 2) {
+      line.setAttribute("points", "");
+      return;
+    }
+    var max = floor;
+    for (var i = 0; i < pts.length; i++) {
+      if (pts[i] > max) {
+        max = pts[i];
+      }
+    }
+    var out = [];
+    for (var j = 0; j < pts.length; j++) {
+      var x = (j * 200) / (pts.length - 1);
+      // Two units of headroom top and bottom so the stroke is not clipped.
+      var y = 32 - (pts[j] / max) * 30;
+      out.push(x.toFixed(1) + "," + y.toFixed(1));
+    }
+    line.setAttribute("points", out.join(" "));
+  }
+
+  function setText(id, text) {
+    var node = el(id);
+    if (node) {
+      node.textContent = text;
+    }
+  }
+
+  function renderNet() {
+    var rtts = netNumbers(netRtt);
+    var downs = netNumbers(netDown);
+    var holding = Date.now() < netHoldUntil;
+
+    // The newest sample, not the newest good one. A robot that has just gone away
+    // must not leave its last healthy latency sitting in the header next to a loss
+    // count that is climbing, which reads as a working link. The window statistics
+    // below still describe the samples that did land.
+    var lastRtt = netRtt.length ? netRtt[netRtt.length - 1] : null;
+    var lastDown = netDown.length ? netDown[netDown.length - 1] : null;
+    setText("vbLatency", typeof lastRtt === "number" ? String(Math.round(lastRtt)) : "--");
+    if (!holding) {
+      setText("vbThroughput", typeof lastDown === "number" ? String(Math.round(lastDown / 1024)) : "--");
+      setText("vbDownLabel", typeof lastDown === "number" ? netRate(lastDown) : "--");
+    }
+
+    if (rtts.length) {
+      var lo = Math.min.apply(null, rtts);
+      var hi = Math.max.apply(null, rtts);
+      setText("vbLatLabel", Math.round(lo) + " / " + Math.round(netMean(rtts)) + " / " + Math.round(hi) + " ms");
+    } else {
+      setText("vbLatLabel", "--");
+    }
+
+    var jitter = netJitter(rtts);
+    setText("vbNetJitter", jitter === null ? "--" : jitter.toFixed(1) + " ms");
+    setText("vbNetTarget", netTarget || "--");
+
+    var lost = 0;
+    for (var i = 0; i < netRtt.length; i++) {
+      if (netRtt[i] === null) {
+        lost++;
+      }
+    }
+    setText("vbNetLoss", netRtt.length ? lost + " / " + netRtt.length : "--");
+    setText("vbNetProbe", netError ? netShort(netError) : (netProbeName || "--"));
+
+    var probeEl = el("vbNetProbe");
+    if (probeEl) {
+      probeEl.classList.toggle("vb-kvv-accent", !netError);
+    }
+
+    renderSpark("vbLatSpark", netRtt, NET_FLOOR_MS);
+    renderSpark("vbDownSpark", netDown, NET_FLOOR_BPS);
+  }
+
+  // Throughput is the difference between two readings of a counter that only climbs,
+  // over the time between them. Differencing here rather than server-side is why
+  // net_probe can stay stateless and why the averaging window is the page's choice.
+  function netDelta(probe) {
+    var now = Date.now();
+    var prev = netPrev;
+    netPrev = { bytes: probe.camBytes, at: now };
+    if (!prev) {
+      return null;
+    }
+    var seconds = (now - prev.at) / 1000;
+    // A counter that went backwards means the server restarted, not a negative rate.
+    if (seconds <= 0 || probe.camBytes < prev.bytes) {
+      return null;
+    }
+    return (probe.camBytes - prev.bytes) / seconds;
+  }
+
+  function pollNet() {
+    if (!vbEsn || !el("vbLatency")) {
+      return null;
+    }
+    return fetchProbe(netURL())
+      .then(function (probe) {
+        if (!probe || typeof probe.rttMs !== "number") {
+          throw new Error("bad probe");
+        }
+        netPush(netRtt, probe.rttMs);
+        netPush(netDown, netDelta(probe));
+        netTarget = typeof probe.target === "string" ? probe.target : "";
+        // Named by the server rather than hardcoded here, so the row always says
+        // which RPC produced the number above it.
+        netProbeName = typeof probe.probe === "string" ? probe.probe : "";
+        netError = "";
+      })
+      .catch(function (e) {
+        // /api-sdk/ answers an unreachable robot with a plain-text "error: ..." body
+        // and HTTP 200, so .json() rejecting is the failure signal here, the same
+        // one the battery and stim pollers already rely on.
+        netPush(netRtt, null);
+        netPush(netDown, null);
+        netPrev = null;
+        netError = e && e.message ? e.message : "probe failed";
+      })
+      .then(function () {
+        renderNet();
+      });
+  }
+
+  function runThroughput() {
+    if (netRunning) {
+      return;
+    }
+    var btn = el("vbNetRun");
+    if (!vbEsn) {
+      setText("vbDownLabel", "no serial");
+      return;
+    }
+    netRunning = true;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = ELLIPSIS;
+    }
+    // Held from the start, not just once the result lands, so the poller's own
+    // render does not wipe this out on the very next tick.
+    netHoldUntil = Date.now() + NET_RUN_MS + NET_RUN_HOLD_MS;
+    setText("vbDownLabel", "measuring" + ELLIPSIS);
+
+    var first = null;
+    var startedAt = 0;
+
+    fetchProbe(netURL())
+      .then(function (probe) {
+        if (!probe || !probe.camOn) {
+          // Nothing is streaming, so there is no traffic on the link to measure.
+          // Say that rather than report the honest but useless 0 kB/s an idle
+          // counter would give.
+          throw new Error("camera off");
+        }
+        first = probe;
+        startedAt = Date.now();
+        return new Promise(function (resolve) {
+          setTimeout(resolve, NET_RUN_MS);
+        });
+      })
+      .then(function () {
+        return fetchProbe(netURL());
+      })
+      .then(function (second) {
+        var seconds = (Date.now() - startedAt) / 1000;
+        var delta = second.camBytes - first.camBytes;
+        if (seconds <= 0 || delta < 0) {
+          throw new Error("counter reset");
+        }
+        var rate = delta / seconds;
+        netHoldUntil = Date.now() + NET_RUN_HOLD_MS;
+        setText("vbDownLabel", netRate(rate) + " over " + Math.round(seconds) + "s");
+        setText("vbThroughput", String(Math.round(rate / 1024)));
+      })
+      .catch(function (e) {
+        netHoldUntil = Date.now() + NET_RUN_HOLD_MS;
+        setText("vbDownLabel", netShort(e && e.message ? e.message : "failed"));
+      })
+      .then(function () {
+        netRunning = false;
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = "RUN";
+        }
+      });
+  }
+
+  function initNetRun() {
+    var btn = el("vbNetRun");
+    if (btn) {
+      btn.addEventListener("click", runThroughput);
+    }
+  }
+
   // ---------------------------------------------------------------------------- init
 
   var statusPoller = makePoller(pollStatus, STATUS_POLL_MS);
   var batteryPoller = makePoller(pollBattery, BATTERY_POLL_MS);
   var logPoller = makePoller(pollLogs, LOG_POLL_MS);
+  var netPoller = makePoller(pollNet, NET_POLL_MS);
 
   function init() {
     // Only the settings dashboard has this card; anywhere else, do nothing at all.
@@ -843,10 +1169,13 @@
     initLogChips();
     renderLogs();
     initCam();
+    initNetRun();
+    renderNet();
 
     statusPoller.start();
     batteryPoller.start();
     logPoller.start();
+    netPoller.start();
 
     document.addEventListener("visibilitychange", function () {
       if (document.hidden) {
@@ -861,6 +1190,7 @@
       statusPoller.kick();
       batteryPoller.kick();
       logPoller.kick();
+      netPoller.kick();
     });
 
     window.addEventListener("beforeunload", stopCam);
@@ -879,6 +1209,7 @@
         statusPoller.kick();
         batteryPoller.kick();
         logPoller.kick();
+        netPoller.kick();
       },
       openDrawer: function () {
         setDrawer(true);

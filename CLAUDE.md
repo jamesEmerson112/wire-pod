@@ -105,7 +105,34 @@ Known upstream bugs, NOT yet fixed in this fork (verify still present before PRi
 - `GET /api/get_kg_api` returns the LLM API key in plaintext to any LAN client
   (`config-ws/webserver.go`) — needs an upstream design conversation, not a drive-by fix.
 
+## Rust port (sibling repo)
+
+A full-parity Rust rewrite of the chipper server lives in the separate repo
+`../wire-pod-rs` (local git only, not on GitHub). Approved plan:
+`~/.claude/plans/breezy-knitting-cray.md` (11 phases, P0–P10). The Rust server
+targets drop-in protocol/state compatibility — same gRPC/HTTP/mDNS contract,
+same `%APPDATA%\wire-pod` state files — so cutover/rollback is stop-one,
+start-the-other. Runtime assets (webroot, intent-data, epod certs, stttest.pcm,
+weather-map) are vendored there byte-identically from THIS repo;
+`cargo xtask sync-assets --from ../wire-pod --check` (run in wire-pod-rs)
+detects drift — run it after editing webroot or intent-data here. This Go repo
+stays the production server until cutover (plan P10) and the rollback for a
+month after.
+
 ## Context History
+
+### 2026-08-19 10:21
+- [feat] **Rust port started.** Plan-mode session produced an approved 11-phase full-parity port plan (`~/.claude/plans/breezy-knitting-cray.md`); user chose: chipper only, full parity (all 6 STT engines, Lua + re-designed plugin system, BLE deferred), Windows-first, **new repo** `../wire-pod-rs`.
+- Phase 0 complete in wire-pod-rs (commits `2230024`, `f0c15e3`): 13-crate Cargo workspace + xtask + CI; all 15 protos vendored from the Go module cache and compiling under tonic/protox; assets vendored byte-identically with sync-check tooling; `.gitattributes` disables EOL conversion to protect byte fidelity.
+- All 4 de-risk spikes PASS on Windows/MSVC:
+  - S1: rustls + hyper-auto TLS listener serving real `StreamingConnectionCheck` + `/ok` + `/ok:80`; selftest green with **ALPN on and off** (preface sniffing = cmux parity).
+  - S2: Rust vosk crate + the installed `libvosk.dll`/en-US model transcribe `stttest.pcm` → **"how are you"** (engine-parity golden).
+  - S3: opus/ogg roundtrips, WebRTC VAD, Go filter chain ported bug-for-bug (incl. `alpha = dt/(rc+dt)` quirk + per-chunk state reset); filtered-PCM sha256 golden recorded.
+  - S4: mlua (Lua 5.1) and extism WASM hosts both work — plugins-on-Windows is new capability.
+- Notable port findings: vector-sdk `shared.proto` is missing `import "onboarding.proto"` (patched in the vendored copy, see wire-pod-rs DEVIATIONS.md); cmake 4.x needs `CMAKE_POLICY_VERSION_MINIMUM=3.5` for vendored libopus; epod key is RSA-2048 (not 1028 — that only affects generated IP-mode certs); BLE was never in the packaged Windows build (`inbuiltble` tag); the Windows tray shell lives in the separate `WirePod` repo (~900 LOC to re-implement in plan P9).
+- [todo] **S1 live robot test pending** (`wire-pod-rs/RUNBOOK-S1.md`): needs user present — elevated shell, quit WirePod tray app, robot offline ~5 min, verify conn-check with ALPN on+off, restart Go app. Then phases P1–P10 remain (P1 robot auth → P2 voice → P3 LLM is the XL one).
+- [note] Monthly Claude spend limit hit 2026-08-19: subagent/workflow spawns fail until raised; sessions run single-context, one phase at a time with a commit per checkpoint.
+- Prior session (2026-08-18): Jetson "second brain" fan-out investigation written to `docs/jetson-second-brain-investigation.md` (untracked) — verdict: wire-pod stays the foundation, wire-os is orthogonal robot-side firmware, Orin Nano Super 8GB is the target board; superseded as the active effort by the Rust port above (Jetson remains plan-compatible: Linux aarch64 is a P9 target).
 
 ### 2026-07-16 14:07
 - Merged `feature/log-redesign` into main (log system redesign + 3-state bot status UI), deployed on the robot as v1.2.18-custom. Added "Upstream PR candidates" section to this file.

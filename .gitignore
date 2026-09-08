@@ -49,3 +49,6 @@
 /vws
 vector-logs-*.tar.bz2
 log_example.txt
+.gstack/
+Vector Brain.html
+docs/jetson-second-brain-investigation.md
